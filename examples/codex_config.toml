@@ -1,0 +1,4 @@
+[mcp_servers.team]
+command = "python"
+args = ["D:\\mcp\\team_coordinator.py"]
+env = { TEAM_STATE_FILE = "D:\\mcp\\shared_state.json" }

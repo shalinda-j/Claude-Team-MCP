@@ -1,0 +1,21 @@
+# Runtime state (never commit live team/brain data)
+*.json.lock
+shared_state.json
+.claude_team_state.json
+second_brain/
+*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
