@@ -1,6 +1,6 @@
 # Claude Team MCP
 
-> A Model Context Protocol (MCP) server that turns multiple AI coding agents — across Claude Code, Cursor, Codex CLI, Gemini CLI, or any MCP-compatible client — into a coordinated team that chats, debates, remembers, and works in parallel on the same project.
+> A Model Context Protocol (MCP) server that turns multiple AI coding agents — across Claude Code, Cursor, Codex CLI, Gemini CLI, or any MCP-compatible client — into a coordinated team that chats, debates, remembers, audits security, and works in parallel on the same project.
 
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue)
@@ -39,6 +39,12 @@ A single agent has one perspective and one context window. Real engineering work
 - **Second brain** — a self-contained knowledge graph (notes, links, backlinks, categories, tags, daily journal) stored on disk.
 - **Concurrency-safe** — file locking + atomic writes mean multiple clients can write at once without corrupting or losing data (verified with 200 concurrent writes).
 - **Multi-CLI** — Claude Code, Cursor, Codex CLI, and Gemini CLI all interoperate when pointed at the same state file.
+- **Reliability** — read receipts, health-check pings, automatic state backups + restore, and crash recovery that releases a downed agent's tasks back to the board.
+- **Workflow engine** — task dependencies (auto-blocking), sub-tasks, priorities, skill-based auto-assignment, and reusable workflow templates.
+- **Live dashboard** — a zero-dependency web dashboard showing the board, channel, agents, debate, and timeline, auto-refreshing in your browser.
+- **Intelligence** — meaning-based search across memory, smart task routing, conflict detection, debate scoring, and token-saving context checkpoints.
+- **Integration** — Obsidian export, git branch/commit linking, worktree suggestions, and Slack/Discord/Teams webhooks.
+- **Security audit** — security-role agents can find, triage, fix, and verify vulnerabilities in your own project and produce a report.
 
 ## Requirements
 
@@ -133,7 +139,7 @@ The agents now coordinate through the shared channel and board.
 
 ## Tools
 
-The server exposes 35 tools, grouped by purpose.
+The server exposes 73 tools, grouped by purpose.
 
 ### Team coordination
 `join_team`, `post_message`, `read_channel`, `wait_for_message`, `add_task`, `update_task`, `view_board`
@@ -142,7 +148,7 @@ The server exposes 35 tools, grouped by purpose.
 `set_status`, `who_is_free`, `assign_work`
 
 ### Structured debate
-`start_debate`, `submit_proposal`, `submit_critique`, `revise_proposal`, `next_round`, `get_debate`, `judge_debate`
+`start_debate`, `submit_proposal`, `submit_critique`, `revise_proposal`, `next_round`, `get_debate`, `judge_debate`, `cast_vote`, `vote_tally`, `score_debate`
 
 ### Project memory
 `save_note`, `search_notes`, `set_fact`, `get_facts`, `save_summary`, `load_summary`, `project_log`
@@ -153,8 +159,38 @@ The server exposes 35 tools, grouped by purpose.
 ### Second brain
 `brain_add`, `brain_search`, `brain_get`, `brain_link`, `brain_backlinks`, `brain_daily`, `brain_list`
 
+### Reliability
+`acknowledge`, `read_receipts`, `ping`, `backup_now`, `list_backups`, `restore_backup`, `recover_tasks`, `safe_call`
+
+### Workflow
+`set_skills`, `auto_assign`, `save_template`, `list_templates`, `run_template`
+
+### Observability
+`start_dashboard`, `stop_dashboard`, `metrics`, `timeline`, `export_report`
+
+### Intelligence
+`smart_search`, `suggest_route`, `check_conflicts`, `context_checkpoint`
+
+### Integration
+`network_info`, `obsidian_sync`, `git_link`, `suggest_worktrees`, `webhook_notify`
+
+### Security audit
+`report_finding`, `list_findings`, `get_finding`, `triage_finding`, `assign_fix`, `verify_fix`, `security_report`, `start_security_audit`
+
 ### Reset
 `reset_team`
+
+## Security audit workflow
+
+Beyond building software, the team can audit its own project for vulnerabilities. Spin up security-role agents (SAST auditor, secret hunter, dependency scanner, config auditor), and they record findings on a shared board with severity levels, debate whether each is real, triage them, assign fixes to developer agents, verify the fixes actually hold, and produce a Markdown security report. This is purely defensive — it helps a team find and fix weaknesses in their own codebase.
+
+```
+Security-Lead: start a security audit for this project.
+Auditors: scan and report_finding for each issue (with severity + location).
+Team: debate which findings are real vs false positives.
+Security-Lead: triage, then assign_fix to a developer agent.
+Auditor: verify_fix after the fix, then security_report.
+```
 
 ## Configuration
 

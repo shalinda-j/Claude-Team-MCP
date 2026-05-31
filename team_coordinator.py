@@ -28,8 +28,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -92,7 +94,18 @@ def _default_state() -> dict:
         "spawned": {},   # role -> {pid, terminal, started}
         "debate": None,  # active structured debate, or None
         "archived_messages": 0,  # count rotated out of the channel
+        "read_state": {},   # role -> last message index that role has acknowledged
+        "skills": {},       # role -> [skill tags] for auto-assign
+        "templates": {},    # name -> [ {title, assignee_skill, priority, depends_on_offset} ]
+        "findings": [],     # security findings (vulnerabilities)
     }
+
+
+# --- Batch A: Reliability config ---
+BACKUP_DIR = Path(os.environ.get("TEAM_BACKUP_DIR", str(STATE_FILE.parent / "team_backups")))
+BACKUP_KEEP = int(os.environ.get("BACKUP_KEEP", "10"))       # how many backups to retain
+BACKUP_EVERY = int(os.environ.get("BACKUP_EVERY", "15"))     # snapshot every N writes
+HEARTBEAT_STALE = int(os.environ.get("HEARTBEAT_STALE", "120"))  # ping considered stale after N s
 
 
 class _Lock:
@@ -132,6 +145,29 @@ def _atomic_write(path: Path, text: str) -> None:
                 pass
 
 
+# --- Batch A: backup / restore ---
+def _make_backup(text: str) -> None:
+    """Save a timestamped snapshot of the state and prune old ones. Best-effort."""
+    try:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        _atomic_write(BACKUP_DIR / f"state_{stamp}.json", text)
+        backups = sorted(BACKUP_DIR.glob("state_*.json"))
+        for old in backups[:-BACKUP_KEEP]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except Exception:
+        pass  # never let backup failure break a write
+
+
+def _list_backups():
+    if not BACKUP_DIR.exists():
+        return []
+    return sorted(BACKUP_DIR.glob("state_*.json"))
+
+
 def _read_state_unlocked() -> dict:
     state = _default_state()
     if STATE_FILE.exists():
@@ -155,7 +191,13 @@ def _write_state_unlocked(state: dict) -> None:
     log = state.get("activity_log", [])
     if len(log) > LOG_ROTATE_LIMIT:
         state["activity_log"] = log[-LOG_ROTATE_LIMIT:]
-    _atomic_write(STATE_FILE, json.dumps(state, indent=2, ensure_ascii=False))
+    # Batch A: bump write counter BEFORE serializing so it persists.
+    state["_write_count"] = state.get("_write_count", 0) + 1
+    do_backup = (state["_write_count"] % BACKUP_EVERY == 0)
+    text = json.dumps(state, indent=2, ensure_ascii=False)
+    _atomic_write(STATE_FILE, text)
+    if do_backup:
+        _make_backup(text)
 
 
 def _load() -> dict:
@@ -349,25 +391,42 @@ def wait_for_message(since_index: int, my_role: str = "", timeout_seconds: int =
 
 
 @mcp.tool()
-def add_task(title: str, assignee: str = "", created_by: str = "") -> str:
+def add_task(title: str, assignee: str = "", created_by: str = "",
+             priority: str = "medium", depends_on: str = "", parent_id: int = 0) -> str:
     """Add a task to the shared board (usually the PM).
 
     Args:
         title: Short description.
         assignee: Role responsible. Empty = unassigned.
         created_by: Your role.
+        priority: "high", "medium", or "low" (default medium).
+        depends_on: Comma-separated task IDs that must be DONE before this can start, e.g. "1,2".
+        parent_id: If this is a sub-task, the parent task's id (0 = top-level task).
     """
+    priority = priority.lower().strip()
+    if priority not in ("high", "medium", "low"):
+        priority = "medium"
+    deps = [int(x.strip()) for x in depends_on.split(",") if x.strip().isdigit()]
+
     def op(state):
         task_id = (max([t["id"] for t in state["tasks"]], default=0)) + 1
-        state["tasks"].append({"id": task_id, "title": title, "assignee": assignee,
-                               "status": "todo", "created_by": created_by, "updated": _hms()})
+        state["tasks"].append({
+            "id": task_id, "title": title, "assignee": assignee, "status": "todo",
+            "created_by": created_by, "updated": _hms(),
+            "priority": priority, "depends_on": deps, "parent_id": parent_id or 0,
+        })
         _log(state, created_by or "system", f'added task #{task_id}: {title}')
         _touch_agent(state, created_by)
         return task_id
 
     task_id = _mutate(op)
     who = f" assigned to {assignee}" if assignee else " (unassigned)"
-    return f'Task #{task_id} added: "{title}"{who}.'
+    extra = f" [priority: {priority}]"
+    if deps:
+        extra += f" [depends on: {', '.join('#'+str(d) for d in deps)}]"
+    if parent_id:
+        extra += f" [sub-task of #{parent_id}]"
+    return f'Task #{task_id} added: "{title}"{who}.{extra}'
 
 
 @mcp.tool()
@@ -384,7 +443,17 @@ def update_task(task_id: int, status: str = "", assignee: str = "", note: str = 
     def op(state):
         task = next((t for t in state["tasks"] if t["id"] == task_id), None)
         if not task:
-            return None
+            return {"error": "notfound"}
+        # Batch B: block starting a task whose dependencies aren't done yet.
+        if status == "in_progress":
+            deps = task.get("depends_on", [])
+            unmet = []
+            for d in deps:
+                dep = next((t for t in state["tasks"] if t["id"] == d), None)
+                if dep and dep.get("status") != "done":
+                    unmet.append(f"#{d} ({dep.get('status', '?')})")
+            if unmet:
+                return {"error": "blocked", "unmet": unmet, "task": task}
         if status:
             task["status"] = status
         if assignee:
@@ -406,11 +475,30 @@ def update_task(task_id: int, status: str = "", assignee: str = "", note: str = 
                     "text": f"@{who} finished task #{task_id} and is now IDLE -- ready for more.",
                     "time": _hms(),
                 })
-        return task
+            # Batch B: notify tasks that were waiting on this one.
+            newly_ready = []
+            for t in state["tasks"]:
+                if task_id in t.get("depends_on", []) and t.get("status") == "todo":
+                    remaining = [d for d in t["depends_on"]
+                                 if next((x for x in state["tasks"] if x["id"] == d), {}).get("status") != "done"]
+                    if not remaining:
+                        newly_ready.append(t)
+            for t in newly_ready:
+                tgt = t.get("assignee") or "all"
+                state["messages"].append({
+                    "from": "system", "mention": tgt,
+                    "text": f"Task #{t['id']} '{t['title']}' is now UNBLOCKED (all dependencies done) and ready to start.",
+                    "time": _hms(),
+                })
+        return {"task": task}
 
-    task = _mutate(op)
-    if not task:
+    res = _mutate(op)
+    if res.get("error") == "notfound":
         return f"No task #{task_id} found."
+    if res.get("error") == "blocked":
+        return (f"BLOCKED: task #{task_id} can't start yet — waiting on {', '.join(res['unmet'])}. "
+                f"Finish those dependencies first.")
+    task = res["task"]
     return f"Updated task #{task_id}: status={task['status']}, assignee={task['assignee'] or 'none'}."
 
 
@@ -436,10 +524,28 @@ def view_board(my_role: str = "") -> str:
     if not state["tasks"]:
         out.append("  (empty)")
     icons = {"todo": "[ ]", "in_progress": "[~]", "blocked": "[!]", "done": "[x]"}
-    for t in state["tasks"]:
-        mine = "  <-- YOURS" if my_role and t["assignee"] == my_role else ""
+    pri_mark = {"high": "!!", "medium": "  ", "low": "..", }
+    pri_order = {"high": 0, "medium": 1, "low": 2}
+    # Top-level tasks sorted by (priority, id); sub-tasks nested under parents.
+    tops = [t for t in state["tasks"] if not t.get("parent_id")]
+    tops.sort(key=lambda t: (pri_order.get(t.get("priority", "medium"), 1), t["id"]))
+    def render(t, indent):
+        mine = "  <-- YOURS" if my_role and t.get("assignee") == my_role else ""
         ic = icons.get(t["status"], "[ ]")
-        out.append(f"  {ic} #{t['id']} {t['title']} ({t['assignee'] or 'unassigned'}){mine}")
+        pm = pri_mark.get(t.get("priority", "medium"), "  ")
+        deps = t.get("depends_on", [])
+        depstr = ""
+        if deps:
+            undone = [d for d in deps if next((x for x in state["tasks"] if x["id"] == d), {}).get("status") != "done"]
+            depstr = f" (waiting on {', '.join('#'+str(d) for d in undone)})" if undone else " (deps met)"
+        return f"  {'  '*indent}{pm} {ic} #{t['id']} {t['title']} ({t.get('assignee') or 'unassigned'}){depstr}{mine}"
+    for t in tops:
+        out.append(render(t, 0))
+        subs = [s for s in state["tasks"] if s.get("parent_id") == t["id"]]
+        subs.sort(key=lambda s: s["id"])
+        for s in subs:
+            out.append(render(s, 1))
+    out.append("\n  legend: !! high  .. low  |  [ ]todo [~]doing [!]blocked [x]done")
     return "\n".join(out)
 
 
@@ -1252,6 +1358,1369 @@ def judge_debate(judge_role: str, decision: str, reason: str, create_tasks: bool
     _save(state)
     return (f"Debate decided: {decision}.{made} Decision saved to project memory. "
             f"Now assign and execute the task as a team.")
+
+
+# ============================================================================
+# SECURITY — vulnerability findings workflow (audit a project with security agents)
+# ============================================================================
+# Lets security-role agents (SAST auditor, secret hunter, dependency scanner,
+# auth reviewer, config auditor) record findings on a shared board, debate whether
+# they are real, triage severity, assign fixes, verify fixes, and produce a report.
+# This is DEFENSIVE: it helps the team find and fix weaknesses in their OWN project.
+
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+_VALID_SEVERITY = set(_SEVERITY_ORDER)
+_VALID_FSTATUS = {"open", "confirmed", "false_positive", "fixed", "verified", "wont_fix"}
+
+
+@mcp.tool()
+def report_finding(role: str, title: str, severity: str, location: str = "",
+                   description: str = "", recommendation: str = "", category: str = "") -> str:
+    """Record a security finding (a potential vulnerability) on the shared findings
+    board. Security-role agents call this while auditing the project.
+
+    Args:
+        role: Your role, e.g. "SAST-Auditor", "Secret-Hunter".
+        title: Short finding name, e.g. "SQL injection in login query".
+        severity: critical | high | medium | low | info.
+        location: Where it is, e.g. "src/auth/login.py:42".
+        description: What the issue is and why it's a risk.
+        recommendation: How to fix it.
+        category: Optional class, e.g. "injection", "secrets", "auth", "config", "deps".
+    """
+    severity = severity.lower().strip()
+    if severity not in _VALID_SEVERITY:
+        return f"severity must be one of: {', '.join(_SEVERITY_ORDER)}."
+
+    def op(state):
+        fid = (max([f["id"] for f in state["findings"]], default=0)) + 1
+        state["findings"].append({
+            "id": fid, "title": title, "severity": severity, "location": location,
+            "description": description, "recommendation": recommendation,
+            "category": category.lower(), "status": "open",
+            "reported_by": role, "assigned_to": "", "time": _now(),
+        })
+        state["messages"].append({
+            "from": role, "mention": "Security-Lead",
+            "text": f"[SECURITY {severity.upper()}] #{fid} {title}" + (f" @ {location}" if location else ""),
+            "time": _hms()})
+        _log(state, role, f"reported finding #{fid} ({severity}): {title}")
+        _touch_agent(state, role)
+        return fid
+    fid = _mutate(op)
+    return f"Finding #{fid} recorded [{severity.upper()}]: {title}. Security-Lead notified for triage."
+
+
+@mcp.tool()
+def list_findings(severity: str = "", status: str = "", category: str = "") -> str:
+    """List security findings, sorted by severity (critical first). Filter optionally.
+
+    Args:
+        severity: Filter by severity (critical/high/medium/low/info). Empty = all.
+        status: Filter by status (open/confirmed/false_positive/fixed/verified/wont_fix).
+        category: Filter by category.
+    """
+    state = _load()
+    findings = state.get("findings", [])
+    sev = severity.lower().strip()
+    st = status.lower().strip()
+    cat = category.lower().strip()
+    rows = [f for f in findings
+            if (not sev or f["severity"] == sev)
+            and (not st or f["status"] == st)
+            and (not cat or f.get("category") == cat)]
+    if not rows:
+        return "No findings match." if findings else "No findings recorded yet."
+    rows.sort(key=lambda f: (_SEVERITY_ORDER.get(f["severity"], 9), f["id"]))
+    icons = {"open": "🔴", "confirmed": "🟠", "false_positive": "⚪",
+             "fixed": "🟡", "verified": "🟢", "wont_fix": "⚫"}
+    out = [f"=== SECURITY FINDINGS ({len(rows)}) ==="]
+    for f in rows:
+        ic = icons.get(f["status"], "•")
+        loc = f" @ {f['location']}" if f.get("location") else ""
+        asg = f" -> @{f['assigned_to']}" if f.get("assigned_to") else ""
+        out.append(f"  {ic} #{f['id']} [{f['severity'].upper()}] {f['title']}{loc} "
+                   f"({f['status']}{asg})")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def get_finding(finding_id: int) -> str:
+    """Read one finding in full (description, recommendation, status history).
+
+    Args:
+        finding_id: The finding id.
+    """
+    state = _load()
+    f = next((x for x in state.get("findings", []) if x["id"] == finding_id), None)
+    if not f:
+        return f"No finding #{finding_id}."
+    out = [f"#{f['id']} [{f['severity'].upper()}] {f['title']}",
+           f"Status: {f['status']} | Category: {f.get('category') or '-'} | Reported by: {f['reported_by']}"]
+    if f.get("location"):
+        out.append(f"Location: {f['location']}")
+    if f.get("assigned_to"):
+        out.append(f"Assigned to: @{f['assigned_to']}")
+    out.append("")
+    out.append(f"Description: {f.get('description') or '(none)'}")
+    out.append(f"Recommendation: {f.get('recommendation') or '(none)'}")
+    out.append(f"Reported: {f['time']}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def triage_finding(finding_id: int, status: str, by_role: str = "Security-Lead", note: str = "") -> str:
+    """Triage a finding: confirm it's real, mark it a false positive, or set its
+    lifecycle status. The Security-Lead usually does this after the team debates it.
+
+    Args:
+        finding_id: The finding id.
+        status: open | confirmed | false_positive | fixed | verified | wont_fix.
+        by_role: Your role.
+        note: Optional note posted to the channel.
+    """
+    status = status.lower().strip()
+    if status not in _VALID_FSTATUS:
+        return f"status must be one of: {', '.join(sorted(_VALID_FSTATUS))}."
+
+    def op(state):
+        f = next((x for x in state["findings"] if x["id"] == finding_id), None)
+        if not f:
+            return {"error": True}
+        old = f["status"]
+        f["status"] = status
+        msg = f"Finding #{finding_id} '{f['title']}': {old} -> {status}"
+        if note:
+            msg += f" ({note})"
+        state["messages"].append({"from": by_role, "mention": "all", "text": f"[SECURITY] {msg}", "time": _hms()})
+        _log(state, by_role, f"triaged finding #{finding_id} -> {status}")
+        return {"f": f}
+    res = _mutate(op)
+    if res.get("error"):
+        return f"No finding #{finding_id}."
+    return f"Finding #{finding_id} status set to {status}."
+
+
+@mcp.tool()
+def assign_fix(finding_id: int, to_role: str, by_role: str = "Security-Lead") -> str:
+    """Assign a confirmed finding to a developer agent to fix, creating a linked
+    task and pinging them.
+
+    Args:
+        finding_id: The finding to fix.
+        to_role: The agent who will fix it.
+        by_role: Your role.
+    """
+    def op(state):
+        f = next((x for x in state["findings"] if x["id"] == finding_id), None)
+        if not f:
+            return {"error": "notfound"}
+        f["assigned_to"] = to_role
+        tid = (max([t["id"] for t in state["tasks"]], default=0)) + 1
+        pri = "high" if f["severity"] in ("critical", "high") else "medium"
+        state["tasks"].append({
+            "id": tid, "title": f"Fix [{f['severity']}] {f['title']}", "assignee": to_role,
+            "status": "todo", "created_by": by_role, "updated": _hms(),
+            "priority": pri, "depends_on": [], "parent_id": 0, "finding_id": finding_id})
+        if to_role in state["agents"]:
+            state["agents"][to_role]["status"] = "busy"
+        state["messages"].append({
+            "from": by_role, "mention": to_role,
+            "text": f"@{to_role} please fix security finding #{finding_id} [{f['severity'].upper()}] "
+                    f"'{f['title']}' (task #{tid}). Fix: {f.get('recommendation') or 'see finding'}",
+            "time": _hms()})
+        _log(state, by_role, f"assigned fix of finding #{finding_id} to {to_role}")
+        return {"tid": tid, "f": f}
+    res = _mutate(op)
+    if res.get("error") == "notfound":
+        return f"No finding #{finding_id}."
+    return (f"Finding #{finding_id} assigned to @{to_role} (task #{res['tid']} created, "
+            f"priority {'high' if res['f']['severity'] in ('critical','high') else 'medium'}).")
+
+
+@mcp.tool()
+def verify_fix(finding_id: int, verified: bool, by_role: str = "", note: str = "") -> str:
+    """After a fix, a security agent re-checks and confirms whether the finding is
+    actually resolved. Sets status to 'verified' or back to 'open'.
+
+    Args:
+        finding_id: The finding id.
+        verified: True if the fix genuinely resolves it; False to reopen.
+        by_role: Your role.
+        note: Optional note (e.g. what was re-tested).
+    """
+    def op(state):
+        f = next((x for x in state["findings"] if x["id"] == finding_id), None)
+        if not f:
+            return {"error": True}
+        f["status"] = "verified" if verified else "open"
+        verdict = "VERIFIED FIXED" if verified else "STILL VULNERABLE (reopened)"
+        msg = f"Finding #{finding_id} '{f['title']}' re-checked: {verdict}"
+        if note:
+            msg += f" — {note}"
+        state["messages"].append({"from": by_role or "system", "mention": "all", "text": f"[SECURITY] {msg}", "time": _hms()})
+        _log(state, by_role or "system", f"verify finding #{finding_id}: {verdict}")
+        return {"ok": True}
+    res = _mutate(op)
+    if res.get("error"):
+        return f"No finding #{finding_id}."
+    return f"Finding #{finding_id} {'verified as fixed' if verified else 'reopened — fix did not hold'}."
+
+
+@mcp.tool()
+def security_report(by_role: str = "") -> str:
+    """Generate a full security report (findings by severity, status summary,
+    open criticals) and save it as Markdown next to the state file.
+
+    Args:
+        by_role: Your role.
+    """
+    state = _load()
+    findings = state.get("findings", [])
+    if not findings:
+        return "No findings to report yet."
+    by_sev = {}
+    by_status = {}
+    for f in findings:
+        by_sev[f["severity"]] = by_sev.get(f["severity"], 0) + 1
+        by_status[f["status"]] = by_status.get(f["status"], 0) + 1
+    lines = ["# Security Audit Report", f"_Generated {_now()}_\n"]
+    lines.append("## Summary by severity")
+    for sev in ["critical", "high", "medium", "low", "info"]:
+        if by_sev.get(sev):
+            lines.append(f"- {sev.upper()}: {by_sev[sev]}")
+    lines.append("\n## Summary by status")
+    for st, n in by_status.items():
+        lines.append(f"- {st}: {n}")
+    # Highlight unresolved criticals/highs
+    urgent = [f for f in findings if f["severity"] in ("critical", "high")
+              and f["status"] not in ("fixed", "verified", "false_positive", "wont_fix")]
+    if urgent:
+        lines.append("\n## ⚠️ UNRESOLVED CRITICAL / HIGH")
+        for f in urgent:
+            lines.append(f"- #{f['id']} [{f['severity'].upper()}] {f['title']} "
+                         f"@ {f.get('location') or '?'} ({f['status']})")
+    lines.append("\n## All findings")
+    fs = sorted(findings, key=lambda f: (_SEVERITY_ORDER.get(f["severity"], 9), f["id"]))
+    for f in fs:
+        lines.append(f"\n### #{f['id']} [{f['severity'].upper()}] {f['title']}")
+        lines.append(f"- Status: {f['status']} | Category: {f.get('category') or '-'} "
+                     f"| Reported by: {f['reported_by']}"
+                     + (f" | Assigned: @{f['assigned_to']}" if f.get('assigned_to') else ""))
+        if f.get("location"):
+            lines.append(f"- Location: `{f['location']}`")
+        if f.get("description"):
+            lines.append(f"- Issue: {f['description']}")
+        if f.get("recommendation"):
+            lines.append(f"- Fix: {f['recommendation']}")
+    report = "\n".join(lines)
+    path = STATE_FILE.parent / f"security_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    try:
+        _atomic_write(path, report)
+    except Exception as e:
+        return f"Generated report but couldn't save: {e}\n\n{report}"
+    _mutate(lambda s: _log(s, by_role or "system", "generated security report"))
+    open_crit = sum(1 for f in urgent)
+    return (f"Security report saved to {path}. "
+            f"{len(findings)} findings, {open_crit} unresolved critical/high.\n\n{report}")
+
+
+@mcp.tool()
+def start_security_audit(project_dir: str, by_role: str = "Security-Lead", terminal: str = "wt") -> str:
+    """Kick off a security audit: spawn a standard set of security agents (SAST
+    auditor, secret hunter, dependency scanner, config auditor) for the project,
+    each auto-joining and ready to report findings. Windows only for spawning.
+
+    Args:
+        project_dir: Absolute path of the project to audit.
+        by_role: Your role (the security lead).
+        terminal: "wt" or "cmd".
+    """
+    roles = ["SAST-Auditor", "Secret-Hunter", "Dependency-Scanner", "Config-Auditor"]
+    if sys.platform != "win32":
+        return ("start_security_audit spawns terminals (Windows only). On other systems, "
+                "manually open terminals for these roles: " + ", ".join(roles) +
+                ". Each should join_team then audit and report_finding.")
+    spawned, skipped = [], []
+    state = _load()
+    for r in roles:
+        if r in state.get("spawned", {}):
+            skipped.append(r)
+            continue
+        if len(state.get("spawned", {})) + len(spawned) >= MAX_AGENTS:
+            skipped.append(r + " (limit)")
+            continue
+        try:
+            pid, title = _spawn_windows(r, project_dir, terminal)
+            _mutate(lambda s, rr=r, pp=pid, tt=title: s["spawned"].__setitem__(
+                rr, {"pid": pp, "title": tt, "terminal": terminal, "started": _now()}))
+            spawned.append(r)
+        except Exception as e:
+            skipped.append(f"{r} (error: {e})")
+    _mutate(lambda s: _log(s, by_role, f"started security audit: spawned {spawned}"))
+    msg = f"Security audit started. Spawned: {', '.join(spawned) or 'none'}."
+    if skipped:
+        msg += f" Skipped: {', '.join(skipped)}."
+    msg += " Each agent will audit the project and call report_finding."
+    return msg
+
+
+# ============================================================================
+# BATCH E — INTEGRATION (network mode, Obsidian sync, git, webhooks)
+# ============================================================================
+
+import urllib.request as _urlreq
+import urllib.error as _urlerr
+
+OBSIDIAN_VAULT = os.environ.get("OBSIDIAN_VAULT", "")  # path to a vault folder, optional
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")        # optional default webhook (Slack/Discord/etc)
+
+
+@mcp.tool()
+def network_info() -> str:
+    """Explain how to run this team across MULTIPLE MACHINES, and show whether the
+    live dashboard (which already serves over HTTP) is reachable on the network.
+
+    The coordination state is a shared file. For multiple machines, point every
+    client's TEAM_STATE_FILE at the SAME file on a shared drive / synced folder
+    (e.g. a network share, Dropbox, or Syncthing). The file lock keeps it safe.
+    """
+    out = ["=== NETWORK / MULTI-MACHINE ==="]
+    out.append(f"State file: {STATE_FILE}")
+    out.append("To share across machines, put TEAM_STATE_FILE on a shared/synced path")
+    out.append("(network share, Dropbox, Syncthing). File locking keeps writes safe.")
+    out.append("")
+    if _dashboard_server is not None:
+        port = _dashboard_server.server_address[1]
+        out.append(f"Dashboard is LIVE on port {port}.")
+        out.append(f"To view from another device on your LAN, restart it bound to 0.0.0.0")
+        out.append(f"(set DASHBOARD_HOST=0.0.0.0) and browse http://<this-machine-ip>:{port}/")
+    else:
+        out.append("Dashboard not running. Start it with start_dashboard.")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def obsidian_sync(target: str = "notes", by_role: str = "") -> str:
+    """Export project knowledge to an Obsidian vault as Markdown files (so it shows
+    up in Obsidian with backlinks/graph). Requires OBSIDIAN_VAULT env var set to a
+    vault folder path.
+
+    Args:
+        target: What to export — "notes" (project notes), "brain" (second brain),
+                or "all".
+        by_role: Your role.
+    """
+    if not OBSIDIAN_VAULT:
+        return ("OBSIDIAN_VAULT is not set. Add it when registering the server, e.g. "
+                "env OBSIDIAN_VAULT=D:\\MyVault\\TeamMCP ... then call obsidian_sync again.")
+    vault = Path(OBSIDIAN_VAULT)
+    try:
+        vault.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return f"Cannot create/access vault folder {vault}: {e}"
+    written = 0
+    state = _load()
+    if target in ("notes", "all"):
+        for n in state.get("notes", []):
+            tags = " ".join(f"#{t}" for t in n.get("tags", []))
+            md = f"---\nid: {n['id']}\nby: {n.get('by','')}\ntime: {n['time']}\n---\n\n{n['text']}\n\n{tags}\n"
+            try:
+                _atomic_write(vault / f"note-{n['id']}.md", md)
+                written += 1
+            except Exception:
+                pass
+    if target in ("brain", "all"):
+        try:
+            brain = _brain_load()
+            for n in brain.get("notes", []):
+                links = [l for l in brain.get("links", []) if l["from"] == n["id"] or l["to"] == n["id"]]
+                backlinks = ""
+                for l in links:
+                    other = l["to"] if l["from"] == n["id"] else l["from"]
+                    on = next((x["title"] for x in brain["notes"] if x["id"] == other), str(other))
+                    backlinks += f"- [[brain-{other}|{on}]]\n"
+                tags = " ".join(f"#{t}" for t in n.get("tags", []))
+                cat = f"category: {n.get('category','')}" if n.get("category") else ""
+                md = (f"---\nid: {n['id']}\n{cat}\ntime: {n['time']}\n---\n\n"
+                      f"# {n['title']}\n\n{n['content']}\n\n{tags}\n\n"
+                      f"## Links\n{backlinks or '(none)'}\n")
+                _atomic_write(vault / f"brain-{n['title'][:40].replace('/', '-')}-{n['id']}.md", md)
+                written += 1
+        except Exception:
+            pass
+    _mutate(lambda s: _log(s, by_role or "system", f"obsidian sync ({target}): {written} files"))
+    return f"Synced {written} note(s) to Obsidian vault: {vault}. Open it in Obsidian to see them with the graph view."
+
+
+@mcp.tool()
+def git_link(task_id: int, branch: str = "", commit: str = "", by_role: str = "") -> str:
+    """Link a git branch or commit to a task, so the board records which code
+    corresponds to which work item.
+
+    Args:
+        task_id: The task to link.
+        branch: Branch name (optional).
+        commit: Commit hash or message (optional).
+        by_role: Your role.
+    """
+    def op(state):
+        task = next((t for t in state["tasks"] if t["id"] == task_id), None)
+        if not task:
+            return {"error": True}
+        task.setdefault("git", {})
+        if branch:
+            task["git"]["branch"] = branch
+        if commit:
+            task["git"].setdefault("commits", []).append({"ref": commit, "time": _hms()})
+        state["messages"].append({
+            "from": by_role or "system", "mention": "all",
+            "text": f"Task #{task_id} linked to git" + (f" branch '{branch}'" if branch else "") +
+                    (f" commit {commit[:40]}" if commit else ""),
+            "time": _hms()})
+        _log(state, by_role or "system", f"git-linked task #{task_id}")
+        return {"git": task["git"]}
+    res = _mutate(op)
+    if res.get("error"):
+        return f"No task #{task_id}."
+    return f"Task #{task_id} git link updated: {json.dumps(res['git'])}"
+
+
+@mcp.tool()
+def suggest_worktrees(project_dir: str) -> str:
+    """Generate ready-to-run git worktree commands so each active agent gets its own
+    isolated working directory (preventing file conflicts). Pairs with the MCP board
+    for coordination.
+
+    Args:
+        project_dir: The main repo path, e.g. D:\\AU-HRM\\lankabook\\acc.lankabook.lk
+    """
+    state = _load()
+    roles = [r for r, a in state.get("agents", {}).items()
+             if r != "PM" and a.get("status") in ("online", "idle", "busy")]
+    if not roles:
+        return "No non-PM agents online to create worktrees for."
+    out = [f"# Run these from {project_dir} to give each agent an isolated worktree:"]
+    for r in roles:
+        b = r.lower()
+        out.append(f"git worktree add ../{Path(project_dir).name}-{b} -b {b}")
+    out.append("\n# Then start each agent's client in its own worktree folder.")
+    out.append("# MCP board = coordination; worktrees = file isolation.")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def webhook_notify(event: str, url: str = "", by_role: str = "") -> str:
+    """Send a notification to an external webhook (Slack/Discord/Teams/custom). Use
+    for milestones like 'all tasks done' or 'debate decided'. Posts a simple JSON
+    payload {text: event}. Uses WEBHOOK_URL env var if no url is given.
+
+    Args:
+        event: The message text to send.
+        url: Webhook URL (optional if WEBHOOK_URL env var is set).
+        by_role: Your role.
+    """
+    target = url or WEBHOOK_URL
+    if not target:
+        return ("No webhook URL. Pass url=... or set WEBHOOK_URL env var when registering "
+                "the server. (Slack/Discord both accept a JSON {text/content} POST.)")
+    # Support both Slack ("text") and Discord ("content") shapes.
+    payload = json.dumps({"text": event, "content": event}).encode("utf-8")
+    req = _urlreq.Request(target, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with _urlreq.urlopen(req, timeout=10) as resp:
+            code = resp.getcode()
+    except _urlerr.HTTPError as e:
+        code = e.code
+    except Exception as e:
+        return f"Webhook failed: {e}"
+    _mutate(lambda s: _log(s, by_role or "system", f"webhook sent (HTTP {code})"))
+    return f"Webhook sent (HTTP {code}): {event}"
+
+
+# ============================================================================
+# BATCH D — INTELLIGENCE (semantic search, auto-summarize, conflict detection,
+#                         smart routing, debate scoring)
+# ============================================================================
+
+import re as _re
+import math as _math
+
+_STOP = set("a an the of to in on for and or but is are was were be been being with "
+            "this that these those it its as at by from into we you they i he she "
+            "do does did has have had will would can could should our your their".split())
+
+
+def _stem(w: str) -> str:
+    """Very light stemmer so 'login/logs', 'security/securely', 'database/databases' match."""
+    for suf in ("ation", "izing", "ising", "ingly", "edly", "ing", "ies", "ied", "ly", "es", "ed", "s"):
+        if len(w) > len(suf) + 2 and w.endswith(suf):
+            return w[: -len(suf)]
+    return w
+
+
+def _tokenize(text: str):
+    words = [w for w in _re.findall(r"[a-z0-9]+", (text or "").lower()) if w not in _STOP and len(w) > 1]
+    return [_stem(w) for w in words]
+
+
+def _similarity(a: str, b: str) -> float:
+    """Lightweight cosine-style similarity over token frequency. No dependencies."""
+    ta, tb = _tokenize(a), _tokenize(b)
+    if not ta or not tb:
+        return 0.0
+    fa, fb = {}, {}
+    for w in ta:
+        fa[w] = fa.get(w, 0) + 1
+    for w in tb:
+        fb[w] = fb.get(w, 0) + 1
+    common = set(fa) & set(fb)
+    dot = sum(fa[w] * fb[w] for w in common)
+    na = _math.sqrt(sum(v * v for v in fa.values()))
+    nb = _math.sqrt(sum(v * v for v in fb.values()))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+@mcp.tool()
+def smart_search(query: str, top_k: int = 5) -> str:
+    """Meaning-based search across BOTH project notes and the second brain, ranked
+    by relevance (not just exact keyword match). Use this to recall knowledge
+    cheaply instead of re-reading files or scrolling history.
+
+    Args:
+        query: What you're looking for, in natural words.
+        top_k: How many top results to return (default 5).
+    """
+    state = _load()
+    candidates = []
+    for n in state.get("notes", []):
+        candidates.append(("note", n["id"], n["text"], _similarity(query, n["text"])))
+    try:
+        brain = _brain_load()
+        for n in brain.get("notes", []):
+            blob = f"{n.get('title','')} {n.get('content','')}"
+            candidates.append(("brain", n["id"], f"{n.get('title','')}: {n.get('content','')[:100]}", _similarity(query, blob)))
+    except Exception:
+        pass
+    candidates = [c for c in candidates if c[3] > 0]
+    candidates.sort(key=lambda c: c[3], reverse=True)
+    if not candidates:
+        return f"No relevant matches for '{query}'."
+    out = [f"Top matches for '{query}':"]
+    for src, cid, text, score in candidates[:top_k]:
+        out.append(f"  [{src} #{cid}] (relevance {score:.2f}) {text[:120]}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def suggest_route(text: str) -> str:
+    """Smart routing: given a message or task description, suggest which agent is
+    the best fit based on their declared skills and current availability. The PM
+    can use this to decide who to assign or @mention.
+
+    Args:
+        text: The message/task content to route.
+    """
+    state = _load()
+    ranked = []
+    for role, a in state.get("agents", {}).items():
+        skills = state.get("skills", {}).get(role, [])
+        skill_blob = " ".join(skills) + " " + role
+        score = _similarity(text, skill_blob)
+        # tiny boost for idle availability
+        if a.get("status") == "idle":
+            score += 0.05
+        ranked.append((score, role, a.get("status", "online")))
+    if not ranked:
+        return "No agents registered yet."
+    ranked.sort(reverse=True)
+    out = ["Routing suggestion (best fit first):"]
+    for score, role, status in ranked[:3]:
+        out.append(f"  @{role} ({status}) — fit {score:.2f}")
+    best = ranked[0][1]
+    out.append(f"\nSuggested: @{best}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def check_conflicts() -> str:
+    """Conflict detection: flag risks where agents may collide — multiple agents
+    assigned overlapping work, or several in_progress tasks touching similar areas
+    (by title similarity). Helps avoid two agents editing the same thing.
+
+    """
+    state = _load()
+    tasks = state.get("tasks", [])
+    active = [t for t in tasks if t.get("status") == "in_progress"]
+    warnings = []
+    # Same assignee with multiple in-progress tasks
+    by_assignee = {}
+    for t in active:
+        by_assignee.setdefault(t.get("assignee"), []).append(t)
+    for who, ts in by_assignee.items():
+        if who and len(ts) > 1:
+            warnings.append(f"@{who} has {len(ts)} tasks in progress at once: " +
+                            ", ".join(f"#{t['id']}" for t in ts))
+    # Similar-titled active tasks by different agents (possible overlap)
+    for i in range(len(active)):
+        for j in range(i + 1, len(active)):
+            t1, t2 = active[i], active[j]
+            if t1.get("assignee") != t2.get("assignee"):
+                sim = _similarity(t1["title"], t2["title"])
+                if sim > 0.35:
+                    warnings.append(f"Possible overlap (similarity {sim:.2f}): "
+                                    f"#{t1['id']} '{t1['title']}' (@{t1.get('assignee')}) vs "
+                                    f"#{t2['id']} '{t2['title']}' (@{t2.get('assignee')})")
+    if not warnings:
+        return "No conflicts detected. Work is well-separated."
+    return "⚠️ CONFLICTS / RISKS:\n" + "\n".join("  " + w for w in warnings) + \
+           "\n\nTip: give each agent its own git worktree, or serialize overlapping tasks with dependencies."
+
+
+@mcp.tool()
+def context_checkpoint(role: str, work_done: str, decisions: str = "", next_steps: str = "") -> str:
+    """Auto-summarize helper for TOKEN SAVING. Call this when your context window is
+    getting long: it saves a structured summary you can reload after /clear, so you
+    resume cheaply instead of carrying the whole history. Returns the saved summary.
+
+    Args:
+        role: Your role.
+        work_done: What you've completed so far.
+        decisions: Key decisions made (optional).
+        next_steps: What remains to do (optional).
+    """
+    parts = [f"[{role} checkpoint @ {_now()}]", f"DONE: {work_done}"]
+    if decisions:
+        parts.append(f"DECISIONS: {decisions}")
+    if next_steps:
+        parts.append(f"NEXT: {next_steps}")
+    summary = "\n".join(parts)
+
+    def op(state):
+        sid = len(state["summaries"]) + 1
+        state["summaries"].append({"id": sid, "text": summary, "by": role, "time": _now()})
+        _log(state, role, f"context checkpoint #{sid}")
+        return sid
+    sid = _mutate(op)
+    return (f"Checkpoint #{sid} saved. You can now /clear and call load_summary latest to "
+            f"resume with minimal tokens.\n\n{summary}")
+
+
+@mcp.tool()
+def score_debate() -> str:
+    """Debate quality scoring: rate each agent's contribution in the current debate
+    by argument depth (length/specificity of reasoning) and engagement (critiques
+    given). Helps the judge weigh who argued substantively vs who just agreed.
+
+    """
+    state = _load()
+    d = state.get("debate")
+    if not d:
+        return "No active debate."
+    scores = {}
+    # proposals: reward substantive reasoning
+    for p in d.get("proposals", []):
+        s = scores.setdefault(p["role"], {"proposal": 0, "critiques": 0, "depth": 0})
+        s["proposal"] += 1
+        s["depth"] += len(_tokenize(p.get("argument", "")))
+    # critiques: reward engagement, especially reasoned disagreement
+    for c in d.get("critiques", []):
+        s = scores.setdefault(c["role"], {"proposal": 0, "critiques": 0, "depth": 0})
+        s["critiques"] += 1
+        depth = len(_tokenize(c.get("argument", "")))
+        s["depth"] += depth + (3 if not c.get("agree") else 0)  # reasoned disagreement weighted
+    if not scores:
+        return "No contributions to score yet."
+    ranked = sorted(scores.items(), key=lambda x: x[1]["depth"], reverse=True)
+    out = ["=== DEBATE CONTRIBUTION SCORES ==="]
+    for role, s in ranked:
+        out.append(f"  @{role}: depth {s['depth']} | {s['proposal']} proposal(s), {s['critiques']} critique(s)")
+    out.append("\n(Higher depth = more substantive reasoning. Judge: weigh substance over volume.)")
+    return "\n".join(out)
+
+
+# ============================================================================
+# BATCH C — OBSERVABILITY (dashboard, metrics, export, timeline)
+# ============================================================================
+
+DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "8765"))
+DASHBOARD_HOST = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
+_dashboard_thread = None
+_dashboard_server = None
+
+
+def _compute_metrics(state: dict) -> dict:
+    tasks = state.get("tasks", [])
+    by_status = {}
+    for t in tasks:
+        by_status[t.get("status", "todo")] = by_status.get(t.get("status", "todo"), 0) + 1
+    agents = state.get("agents", {})
+    online = sum(1 for a in agents.values() if a.get("status") in ("online", "idle", "busy"))
+    debates_decided = sum(1 for n in state.get("notes", []) if "decision" in n.get("tags", []))
+    return {
+        "agents_total": len(agents),
+        "agents_online": online,
+        "messages": len(state.get("messages", [])) + state.get("archived_messages", 0),
+        "tasks_total": len(tasks),
+        "tasks_done": by_status.get("done", 0),
+        "tasks_in_progress": by_status.get("in_progress", 0),
+        "tasks_todo": by_status.get("todo", 0),
+        "tasks_blocked": by_status.get("blocked", 0),
+        "notes": len(state.get("notes", [])),
+        "decisions": debates_decided,
+        "active_debate": bool(state.get("debate")),
+    }
+
+
+@mcp.tool()
+def metrics() -> str:
+    """Show team metrics: agent count, message volume, task breakdown, decisions made.
+    A quick health/progress snapshot of the whole project.
+    """
+    m = _compute_metrics(_load())
+    out = ["=== TEAM METRICS ==="]
+    out.append(f"  Agents: {m['agents_online']}/{m['agents_total']} online")
+    out.append(f"  Messages: {m['messages']}")
+    out.append(f"  Tasks: {m['tasks_total']} total — "
+               f"{m['tasks_done']} done, {m['tasks_in_progress']} in progress, "
+               f"{m['tasks_todo']} todo, {m['tasks_blocked']} blocked")
+    if m['tasks_total']:
+        pct = round(100 * m['tasks_done'] / m['tasks_total'])
+        out.append(f"  Progress: {pct}% of tasks done")
+    out.append(f"  Notes: {m['notes']} | Decisions recorded: {m['decisions']}")
+    out.append(f"  Active debate: {'yes' if m['active_debate'] else 'no'}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def timeline(last_n: int = 30) -> str:
+    """Show a chronological timeline of the whole project (joins, tasks, decisions,
+    recoveries) from the activity log.
+
+    Args:
+        last_n: How many recent events to show (default 30).
+    """
+    state = _load()
+    log = state.get("activity_log", [])
+    if not log:
+        return "Timeline is empty."
+    recent = log[-last_n:]
+    out = [f"=== PROJECT TIMELINE (last {len(recent)} of {len(log)}) ==="]
+    for e in recent:
+        out.append(f"  {e['time']}  {e['who']}: {e['action']}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def export_report(by_role: str = "") -> str:
+    """Generate a Markdown project report (metrics, task board, decisions, recent
+    timeline) and save it next to the state file. Good for sharing or archiving.
+
+    Args:
+        by_role: Your role.
+    """
+    state = _load()
+    m = _compute_metrics(state)
+    lines = []
+    lines.append(f"# Team Project Report")
+    lines.append(f"_Generated {_now()}_\n")
+    lines.append("## Metrics")
+    lines.append(f"- Agents online: {m['agents_online']}/{m['agents_total']}")
+    lines.append(f"- Messages: {m['messages']}")
+    lines.append(f"- Tasks: {m['tasks_total']} ({m['tasks_done']} done, "
+                 f"{m['tasks_in_progress']} in progress, {m['tasks_todo']} todo, {m['tasks_blocked']} blocked)")
+    if m['tasks_total']:
+        lines.append(f"- Progress: {round(100*m['tasks_done']/m['tasks_total'])}%")
+    lines.append(f"- Decisions recorded: {m['decisions']}\n")
+    lines.append("## Task Board")
+    icons = {"todo": "[ ]", "in_progress": "[~]", "blocked": "[!]", "done": "[x]"}
+    for t in state.get("tasks", []):
+        sub = "  " if t.get("parent_id") else ""
+        lines.append(f"- {sub}{icons.get(t.get('status'),'[ ]')} #{t['id']} {t['title']} "
+                     f"({t.get('assignee') or 'unassigned'}, {t.get('priority','medium')})")
+    lines.append("\n## Decisions")
+    decs = [n for n in state.get("notes", []) if "decision" in n.get("tags", [])]
+    if decs:
+        for n in decs:
+            lines.append(f"- {n['text']}")
+    else:
+        lines.append("- (none yet)")
+    lines.append("\n## Recent Activity")
+    for e in state.get("activity_log", [])[-20:]:
+        lines.append(f"- {e['time']} — {e['who']}: {e['action']}")
+    report = "\n".join(lines)
+    path = STATE_FILE.parent / f"team_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    try:
+        _atomic_write(path, report)
+    except Exception as e:
+        return f"Generated report but couldn't save: {e}\n\n{report}"
+    _mutate(lambda s: _log(s, by_role or "system", "exported report"))
+    return f"Report saved to {path}\n\n{report}"
+
+
+def _dashboard_html() -> str:
+    return """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Team Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#e6edf3;--dim:#8b949e;--accent:#58a6ff;--green:#3fb950;--amber:#d29922;--red:#f85149;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,Segoe UI,Roboto,sans-serif;padding:16px;font-size:14px}
+h1{font-size:18px;margin-bottom:4px}
+.sub{color:var(--dim);font-size:12px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px}
+.card h2{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:10px}
+.metrics{display:flex;flex-wrap:wrap;gap:14px}
+.metric{min-width:70px}
+.metric .n{font-size:22px;font-weight:600}
+.metric .l{font-size:11px;color:var(--dim)}
+.agent,.task,.msg,.ev{padding:6px 0;border-bottom:1px solid var(--border);font-size:13px}
+.agent:last-child,.task:last-child,.msg:last-child,.ev:last-child{border:none}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.online{background:var(--green)}.idle{background:var(--accent)}.busy{background:var(--amber)}.offline{background:var(--dim)}
+.pill{font-size:10px;padding:1px 6px;border-radius:10px;background:#21262d;color:var(--dim);margin-left:4px}
+.s-done{color:var(--green)}.s-progress{color:var(--amber)}.s-blocked{color:var(--red)}.s-todo{color:var(--dim)}
+.msg .who{color:var(--accent);font-weight:600}
+.mention{color:var(--amber)}
+.scroll{max-height:340px;overflow-y:auto}
+.bar{height:6px;background:#21262d;border-radius:3px;overflow:hidden;margin-top:8px}
+.bar>div{height:100%;background:var(--green)}
+.full{grid-column:1/-1}
+</style></head><body>
+<h1>🤖 Team Dashboard</h1>
+<div class="sub" id="updated">connecting…</div>
+<div class="grid">
+  <div class="card full"><h2>Metrics</h2><div class="metrics" id="metrics"></div><div class="bar"><div id="progbar" style="width:0%"></div></div></div>
+  <div class="card"><h2>Agents</h2><div id="agents"></div></div>
+  <div class="card"><h2>Tasks</h2><div class="scroll" id="tasks"></div></div>
+  <div class="card"><h2>Channel</h2><div class="scroll" id="messages"></div></div>
+  <div class="card"><h2>Debate</h2><div id="debate"></div></div>
+  <div class="card"><h2>Timeline</h2><div class="scroll" id="timeline"></div></div>
+</div>
+<script>
+const E=id=>document.getElementById(id);
+function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function men(s){return esc(s).replace(/@(\\w+)/g,'<span class="mention">@$1</span>');}
+async function tick(){
+ try{
+  const r=await fetch('/api/state'); const d=await r.json();
+  const m=d.metrics;
+  E('metrics').innerHTML=[['agents_online','Online'],['messages','Messages'],['tasks_total','Tasks'],['tasks_done','Done'],['tasks_in_progress','Doing'],['decisions','Decisions']]
+    .map(([k,l])=>`<div class="metric"><div class="n">${m[k]}</div><div class="l">${l}</div></div>`).join('');
+  E('progbar').style.width=(m.tasks_total?Math.round(100*m.tasks_done/m.tasks_total):0)+'%';
+  E('agents').innerHTML=Object.values(d.agents).map(a=>`<div class="agent"><span class="dot ${a.status||'online'}"></span>${esc(a.name)} <span class="pill">${a.role}</span> <span class="pill">${a.status||'online'}</span></div>`).join('')||'<div class="agent">none</div>';
+  E('tasks').innerHTML=d.tasks.map(t=>{const c={done:'s-done',in_progress:'s-progress',blocked:'s-blocked',todo:'s-todo'}[t.status]||'s-todo';const sub=t.parent_id?'&nbsp;&nbsp;↳ ':'';return `<div class="task">${sub}<span class="${c}">●</span> #${t.id} ${esc(t.title)} <span class="pill">${t.assignee||'—'}</span> <span class="pill">${t.priority||'med'}</span></div>`;}).join('')||'<div class="task">none</div>';
+  E('messages').innerHTML=d.messages.slice(-40).map(x=>`<div class="msg"><span class="who">${esc(x.from)}</span>: ${men(x.text)}</div>`).reverse().join('')||'<div class="msg">none</div>';
+  if(d.debate){const dd=d.debate;E('debate').innerHTML=`<b>${esc(dd.topic)}</b><br><span class="pill">${dd.phase}</span> <span class="pill">round ${dd.round+1}/${dd.max_rounds}</span> <span class="pill">judge ${dd.judge_role}</span>`+ (dd.verdict?`<br><br>✅ <b>${esc(dd.verdict.decision)}</b>`:'');}else{E('debate').innerHTML='<span class="s-todo">No active debate</span>';}
+  E('timeline').innerHTML=d.timeline.slice(-25).map(e=>`<div class="ev"><span class="s-todo">${e.time.split(' ')[1]||e.time}</span> ${esc(e.who)}: ${esc(e.action)}</div>`).reverse().join('')||'<div class="ev">none</div>';
+  E('updated').textContent='live · updated '+new Date().toLocaleTimeString();
+ }catch(e){E('updated').textContent='disconnected — retrying…';}
+}
+tick();setInterval(tick,2000);
+</script></body></html>"""
+
+
+class _DashHandler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass  # silence
+
+    def do_GET(self):
+        if self.path.startswith("/api/state"):
+            state = _read_state_unlocked()
+            payload = {
+                "metrics": _compute_metrics(state),
+                "agents": state.get("agents", {}),
+                "tasks": state.get("tasks", []),
+                "messages": state.get("messages", []),
+                "debate": state.get("debate"),
+                "timeline": state.get("activity_log", []),
+            }
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            body = _dashboard_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+
+@mcp.tool()
+def start_dashboard(port: int = 0) -> str:
+    """Launch a live web dashboard showing the board, channel, agents, debate, and
+    timeline, auto-refreshing every 2s. Open the printed URL in your browser.
+
+    Args:
+        port: Port to serve on (0 = use DASHBOARD_PORT, default 8765).
+    """
+    global _dashboard_thread, _dashboard_server
+    if _dashboard_server is not None:
+        return f"Dashboard already running at http://localhost:{_dashboard_server.server_address[1]}/"
+    use_port = port or DASHBOARD_PORT
+    try:
+        _dashboard_server = ThreadingHTTPServer((DASHBOARD_HOST, use_port), _DashHandler)
+    except OSError as e:
+        return f"Could not start dashboard on port {use_port}: {e}. Try a different port."
+    _dashboard_thread = threading.Thread(target=_dashboard_server.serve_forever, daemon=True)
+    _dashboard_thread.start()
+    return (f"Dashboard live at http://localhost:{use_port}/ — open it in your browser. "
+            f"It auto-refreshes every 2 seconds.")
+
+
+@mcp.tool()
+def stop_dashboard() -> str:
+    """Stop the live web dashboard if it's running."""
+    global _dashboard_server, _dashboard_thread
+    if _dashboard_server is None:
+        return "Dashboard is not running."
+    _dashboard_server.shutdown()
+    _dashboard_server.server_close()
+    _dashboard_server = None
+    _dashboard_thread = None
+    return "Dashboard stopped."
+
+
+# ============================================================================
+# BATCH B — WORKFLOW (skills/auto-assign, templates, voting, sub-task helpers)
+# ============================================================================
+
+@mcp.tool()
+def set_skills(role: str, skills: str) -> str:
+    """Declare what an agent is good at, so the PM can auto-assign matching tasks.
+
+    Args:
+        role: The agent role.
+        skills: Space/comma-separated skill tags, e.g. "backend api database".
+    """
+    skill_list = [s.strip().lower() for s in skills.replace(",", " ").split() if s.strip()]
+
+    def op(state):
+        state["skills"][role] = skill_list
+        _log(state, role, f"set skills: {', '.join(skill_list)}")
+    _mutate(op)
+    return f"@{role} skills set: {', '.join(skill_list) or '(none)'}."
+
+
+@mcp.tool()
+def auto_assign(task_id: int, by_role: str = "PM") -> str:
+    """Auto-assign a task to the best-matching IDLE agent based on declared skills
+    and the words in the task title. Falls back to any idle agent.
+
+    Args:
+        task_id: The task to assign.
+        by_role: Your role (usually PM).
+    """
+    def op(state):
+        task = next((t for t in state["tasks"] if t["id"] == task_id), None)
+        if not task:
+            return {"error": "notfound"}
+        title_words = set(task["title"].lower().replace(",", " ").split())
+        candidates = []
+        for role, a in state.get("agents", {}).items():
+            if a.get("status") not in ("idle", "online"):
+                continue
+            skills = set(state.get("skills", {}).get(role, []))
+            score = len(skills & title_words)
+            # idle agents preferred over merely-online
+            score += 1 if a.get("status") == "idle" else 0
+            candidates.append((score, role))
+        if not candidates:
+            return {"error": "noagents"}
+        candidates.sort(reverse=True)
+        best_score, best = candidates[0]
+        task["assignee"] = best
+        task["status"] = "todo"
+        if best in state["agents"]:
+            state["agents"][best]["status"] = "busy"
+        state["messages"].append({
+            "from": by_role, "mention": best,
+            "text": f"@{best} auto-assigned task #{task_id}: {task['title']} (skill match: {best_score}).",
+            "time": _hms()})
+        _log(state, by_role, f"auto-assigned #{task_id} to {best}")
+        return {"role": best, "score": best_score}
+    res = _mutate(op)
+    if res.get("error") == "notfound":
+        return f"No task #{task_id}."
+    if res.get("error") == "noagents":
+        return "No available agents to assign. Everyone is busy or offline."
+    return f"Task #{task_id} auto-assigned to @{res['role']} (match score {res['score']})."
+
+
+@mcp.tool()
+def save_template(name: str, steps: str, by_role: str = "") -> str:
+    """Save a reusable workflow template (a sequence of task steps you can spin up
+    again later, e.g. a 'code-review' or 'SSCL-return' workflow).
+
+    Args:
+        name: Template name, e.g. "sscl-return".
+        steps: Steps as 'title|skill|priority' separated by ';'. depends_on is the
+               previous step automatically. Example:
+               "Parse data|backend|high; Calculate|backend|high; QA verify|qa|medium; Report|frontend|medium".
+        by_role: Your role.
+    """
+    parsed = []
+    for raw in steps.split(";"):
+        raw = raw.strip()
+        if not raw:
+            continue
+        parts = [p.strip() for p in raw.split("|")]
+        title = parts[0]
+        skill = parts[1].lower() if len(parts) > 1 and parts[1] else ""
+        pri = parts[2].lower() if len(parts) > 2 and parts[2] in ("high", "medium", "low") else "medium"
+        parsed.append({"title": title, "skill": skill, "priority": pri})
+    if not parsed:
+        return "No valid steps parsed. Use 'title|skill|priority; ...'."
+
+    def op(state):
+        state["templates"][name] = parsed
+        _log(state, by_role or "system", f"saved template '{name}' ({len(parsed)} steps)")
+    _mutate(op)
+    return f"Template '{name}' saved with {len(parsed)} steps. Run it with run_template."
+
+
+@mcp.tool()
+def list_templates() -> str:
+    """List saved workflow templates."""
+    state = _load()
+    tpls = state.get("templates", {})
+    if not tpls:
+        return "No templates saved. Create one with save_template."
+    out = ["Saved templates:"]
+    for name, steps in tpls.items():
+        out.append(f"  '{name}' ({len(steps)} steps): " + " -> ".join(s["title"] for s in steps))
+    return "\n".join(out)
+
+
+@mcp.tool()
+def run_template(name: str, auto_assign_steps: bool = True, by_role: str = "PM") -> str:
+    """Instantiate a workflow template: creates all its tasks as a dependency chain
+    (each step depends on the previous), with priorities, optionally auto-assigning
+    each to a skill-matched agent.
+
+    Args:
+        name: Template name to run.
+        auto_assign_steps: If True, auto-assign each created task by skill.
+        by_role: Your role.
+    """
+    def op(state):
+        tpl = state.get("templates", {}).get(name)
+        if not tpl:
+            return {"error": "notfound"}
+        created = []
+        prev_id = 0
+        for step in tpl:
+            tid = (max([t["id"] for t in state["tasks"]], default=0)) + 1
+            deps = [prev_id] if prev_id else []
+            task = {"id": tid, "title": step["title"], "assignee": "", "status": "todo",
+                    "created_by": by_role, "updated": _hms(),
+                    "priority": step.get("priority", "medium"),
+                    "depends_on": deps, "parent_id": 0, "_skill": step.get("skill", "")}
+            # try auto-assign by skill among idle/online agents
+            if auto_assign_steps and step.get("skill"):
+                want = step["skill"]
+                match = None
+                for role, a in state.get("agents", {}).items():
+                    if want in state.get("skills", {}).get(role, []):
+                        match = role
+                        break
+                if match:
+                    task["assignee"] = match
+            state["tasks"].append(task)
+            created.append((tid, step["title"], task["assignee"]))
+            prev_id = tid
+        _log(state, by_role, f"ran template '{name}' -> {len(created)} tasks")
+        state["messages"].append({
+            "from": by_role, "mention": "all",
+            "text": f"Workflow '{name}' started: {len(created)} tasks created as a dependency chain.",
+            "time": _hms()})
+        return {"created": created}
+    res = _mutate(op)
+    if res.get("error") == "notfound":
+        return f"No template named '{name}'. See list_templates."
+    lines = [f"Workflow '{name}' instantiated ({len(res['created'])} tasks, chained):"]
+    for tid, title, who in res["created"]:
+        lines.append(f"  #{tid} {title} -> {who or 'unassigned'}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def cast_vote(role: str, choice: str, reason: str = "") -> str:
+    """Cast a vote in the current debate. Complements the judge: votes are tallied
+    so the judge can see where the team leans (but the judge still decides on merit).
+
+    Args:
+        role: Your role.
+        choice: The option you vote for.
+        reason: Optional short reason.
+    """
+    def op(state):
+        d = state.get("debate")
+        if not d:
+            return {"error": "nodebate"}
+        d.setdefault("votes", {})
+        d["votes"][role] = {"choice": choice, "reason": reason, "time": _hms()}
+        state["messages"].append({
+            "from": role, "mention": "all",
+            "text": f"@{role} votes: {choice}" + (f" — {reason}" if reason else ""),
+            "time": _hms()})
+        _log(state, role, f"voted: {choice}")
+        return {"ok": True}
+    res = _mutate(op)
+    if res.get("error") == "nodebate":
+        return "No active debate to vote in. Start one with start_debate."
+    return f"@{role} vote recorded: {choice}."
+
+
+@mcp.tool()
+def vote_tally() -> str:
+    """Show the current vote tally in the active debate (the judge uses this as
+    input, not as the final word)."""
+    state = _load()
+    d = state.get("debate")
+    if not d:
+        return "No active debate."
+    votes = d.get("votes", {})
+    if not votes:
+        return "No votes cast yet."
+    counts = {}
+    for v in votes.values():
+        counts[v["choice"]] = counts.get(v["choice"], 0) + 1
+    out = ["=== VOTE TALLY ==="]
+    for choice, n in sorted(counts.items(), key=lambda x: -x[1]):
+        voters = [r for r, v in votes.items() if v["choice"] == choice]
+        out.append(f"  {choice}: {n} vote(s) — {', '.join(voters)}")
+    out.append("(Judge decides on merit, not just the count.)")
+    return "\n".join(out)
+
+
+# ============================================================================
+# BATCH A — RELIABILITY (read receipts, retry, health, backup/restore, recovery)
+# ============================================================================
+
+@mcp.tool()
+def acknowledge(role: str, up_to_index: int = -1) -> str:
+    """Mark messages as READ by you (a read receipt). Lets the team see who has
+    actually seen what. Call after reading the channel.
+
+    Args:
+        role: Your role.
+        up_to_index: Highest message index you've read. -1 = mark everything read.
+    """
+    def op(state):
+        total = len(state["messages"])
+        idx = total if up_to_index < 0 else min(up_to_index, total)
+        state["read_state"][role] = idx
+        _touch_agent(state, role)
+        return idx, total
+    idx, total = _mutate(op)
+    return f"@{role} acknowledged up to message {idx}/{total}."
+
+
+@mcp.tool()
+def read_receipts(message_index: int = -1) -> str:
+    """See who has read up to a given message (or the latest). Useful to check if
+    an agent has seen an instruction before assuming they're ignoring it.
+
+    Args:
+        message_index: The message index to check. -1 = latest message.
+    """
+    state = _load()
+    total = len(state["messages"])
+    if total == 0:
+        return "No messages yet."
+    target = total - 1 if message_index < 0 else message_index
+    rs = state.get("read_state", {})
+    seen, not_seen = [], []
+    for role in state.get("agents", {}):
+        if rs.get(role, -1) > target:
+            seen.append(role)
+        else:
+            not_seen.append(role)
+    out = [f"Read status for message #{target} (of {total}):"]
+    out.append(f"  Seen by: {', '.join(seen) or 'no one'}")
+    out.append(f"  NOT seen by: {', '.join(not_seen) or 'everyone has seen it'}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def ping(from_role: str, target_role: str = "", timeout_seconds: int = 15) -> str:
+    """Health check: ping a teammate (or everyone) and report who is alive based on
+    recent activity. Does not require the other agent to do anything if their
+    last_seen is fresh; otherwise it posts a ping they can answer.
+
+    Args:
+        from_role: Your role.
+        target_role: Role to ping. Empty = report health of all agents.
+        timeout_seconds: How long to wait for a stale agent to respond.
+    """
+    state = _load()
+    now = _ts()
+    agents = state.get("agents", {})
+    if not target_role:
+        out = ["=== HEALTH CHECK ==="]
+        for role, a in agents.items():
+            last = a.get("last_seen")
+            if last and (now - last) <= HEARTBEAT_STALE:
+                out.append(f"  {role}: ALIVE (seen {int(now - last)}s ago)")
+            else:
+                ago = f"{int(now - last)}s ago" if last else "never"
+                out.append(f"  {role}: NO RECENT ACTIVITY (last {ago})")
+        return "\n".join(out)
+    # Targeted ping: if fresh, report alive immediately.
+    a = agents.get(target_role)
+    if a and a.get("last_seen") and (now - a["last_seen"]) <= HEARTBEAT_STALE:
+        return f"@{target_role} is ALIVE (active {int(now - a['last_seen'])}s ago)."
+    # Otherwise post a ping and wait for them to touch activity.
+    _mutate(lambda s: s["messages"].append(
+        {"from": from_role, "mention": target_role,
+         "text": f"@{target_role} PING from @{from_role} — reply or run any tool to confirm you're alive.",
+         "time": _hms()}))
+    deadline = now + max(1, timeout_seconds)
+    while _ts() < deadline:
+        st = _read_state_unlocked()
+        a = st.get("agents", {}).get(target_role, {})
+        if a.get("last_seen") and (_ts() - a["last_seen"]) <= timeout_seconds:
+            return f"@{target_role} responded — ALIVE."
+        time.sleep(0.5)
+    return f"@{target_role} did NOT respond within {timeout_seconds}s — may be down. Consider recover_tasks."
+
+
+@mcp.tool()
+def backup_now(by_role: str = "") -> str:
+    """Force an immediate backup snapshot of the whole team state.
+
+    Args:
+        by_role: Your role.
+    """
+    state = _load()
+    text = json.dumps(state, indent=2, ensure_ascii=False)
+    _make_backup(text)
+    backups = _list_backups()
+    return f"Backup saved. {len(backups)} backups kept in {BACKUP_DIR} (newest first auto-pruned beyond {BACKUP_KEEP})."
+
+
+@mcp.tool()
+def list_backups() -> str:
+    """List available state backups you can restore from."""
+    backups = _list_backups()
+    if not backups:
+        return f"No backups yet in {BACKUP_DIR}. Backups are made automatically every {BACKUP_EVERY} writes, or via backup_now."
+    out = [f"Backups in {BACKUP_DIR} (oldest first):"]
+    for i, b in enumerate(backups):
+        out.append(f"  [{i}] {b.name}")
+    out.append("Restore with restore_backup(index=...) -- newest is the highest index.")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def restore_backup(index: int = -1, by_role: str = "") -> str:
+    """Restore team state from a backup (e.g. after corruption or a bad reset).
+    A safety backup of the current state is taken first.
+
+    Args:
+        index: Which backup (from list_backups). -1 = most recent.
+        by_role: Your role.
+    """
+    backups = _list_backups()
+    if not backups:
+        return "No backups available to restore."
+    pick = backups[index] if -len(backups) <= index < len(backups) else backups[-1]
+    try:
+        data = json.loads(pick.read_text(encoding="utf-8"))
+    except Exception as e:
+        return f"Could not read backup {pick.name}: {e}"
+    with _Lock(LOCK_FILE):
+        # safety snapshot of current before overwriting
+        try:
+            _make_backup(STATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        _write_state_unlocked(data)
+    return f"Restored team state from {pick.name}. (A safety backup of the previous state was saved first.)"
+
+
+@mcp.tool()
+def recover_tasks(stale_seconds: int = 0, by_role: str = "PM") -> str:
+    """Crash recovery: find in_progress tasks whose assignee is offline/stale and
+    release them back to 'todo' so another agent can pick them up. Call this when
+    an agent crashes or a ping fails.
+
+    Args:
+        stale_seconds: An agent idle longer than this is considered down
+                       (0 = use AGENT_STALE_SECONDS default).
+        by_role: Your role.
+    """
+    limit = stale_seconds or AGENT_STALE_SECONDS
+
+    def op(state):
+        now = _ts()
+        recovered = []
+        for t in state["tasks"]:
+            if t.get("status") != "in_progress":
+                continue
+            who = t.get("assignee")
+            a = state.get("agents", {}).get(who, {})
+            last = a.get("last_seen")
+            down = (a.get("status") == "offline") or (last and (now - last) > limit) or (not a)
+            if who and down:
+                t["status"] = "todo"
+                t["updated"] = _hms()
+                recovered.append((t["id"], who))
+                state["messages"].append({
+                    "from": by_role, "mention": "all",
+                    "text": f"RECOVERY: task #{t['id']} '{t['title']}' released from @{who} (down) back to TODO.",
+                    "time": _hms()})
+        _log(state, by_role, f"recovered {len(recovered)} task(s)")
+        return recovered
+    recovered = _mutate(op)
+    if not recovered:
+        return "No stale in-progress tasks found. Nothing to recover."
+    lines = [f"Recovered {len(recovered)} task(s) back to TODO:"]
+    for tid, who in recovered:
+        lines.append(f"  #{tid} (was @{who})")
+    lines.append("Re-assign them with assign_work.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def safe_call(role: str, action_note: str, attempt: int = 1, max_attempts: int = 3) -> str:
+    """Auto-retry helper. Record that you are attempting an action that might fail
+    (e.g. a flaky build or network step). If it keeps failing, call again with the
+    next attempt number; after max_attempts the team is notified to intervene.
+
+    Args:
+        role: Your role.
+        action_note: What you're trying to do.
+        attempt: Current attempt number (start at 1).
+        max_attempts: Give up and escalate after this many.
+    """
+    def op(state):
+        _touch_agent(state, role)
+        if attempt >= max_attempts:
+            state["messages"].append({
+                "from": role, "mention": "PM",
+                "text": f"@{role} FAILED '{action_note}' after {attempt} attempts — escalating to @PM.",
+                "time": _hms()})
+            _log(state, role, f"escalated after {attempt} attempts: {action_note}")
+            return "escalate"
+        state["messages"].append({
+            "from": role, "mention": "all",
+            "text": f"@{role} retrying '{action_note}' (attempt {attempt}/{max_attempts}).",
+            "time": _hms()})
+        return "retry"
+    outcome = _mutate(op)
+    if outcome == "escalate":
+        return (f"Reached max_attempts ({max_attempts}) for '{action_note}'. Escalated to PM. "
+                f"Stop retrying and wait for guidance.")
+    return (f"Recorded attempt {attempt}/{max_attempts} for '{action_note}'. "
+            f"If it fails again, call safe_call with attempt={attempt + 1}.")
 
 
 # ============================================================================
