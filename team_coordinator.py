@@ -2181,6 +2181,8 @@ h1{font-size:18px;margin-bottom:4px}
 .online{background:var(--green)}.idle{background:var(--accent)}.busy{background:var(--amber)}.offline{background:var(--dim)}
 .pill{font-size:10px;padding:1px 6px;border-radius:10px;background:#21262d;color:var(--dim);margin-left:4px}
 .s-done{color:var(--green)}.s-progress{color:var(--amber)}.s-blocked{color:var(--red)}.s-todo{color:var(--dim)}
+.row{padding:6px 0;border-bottom:1px solid var(--border);font-size:13px}.row:last-child{border:none}
+.sev-critical{color:#f85149}.sev-high{color:#ff7b72}.sev-medium{color:var(--amber)}.sev-low{color:var(--green)}.sev-info{color:var(--dim)}
 .msg .who{color:var(--accent);font-weight:600}
 .mention{color:var(--amber)}
 .scroll{max-height:340px;overflow-y:auto}
@@ -2197,6 +2199,10 @@ h1{font-size:18px;margin-bottom:4px}
   <div class="card"><h2>Channel</h2><div class="scroll" id="messages"></div></div>
   <div class="card"><h2>Debate</h2><div id="debate"></div></div>
   <div class="card"><h2>Timeline</h2><div class="scroll" id="timeline"></div></div>
+  <div class="card"><h2>Security findings</h2><div class="scroll" id="findings"></div></div>
+  <div class="card"><h2>Memory</h2><div id="memory"></div></div>
+  <div class="card"><h2>Reliability &amp; health</h2><div class="scroll" id="reliability"></div></div>
+  <div class="card"><h2>Workflow</h2><div class="scroll" id="workflow"></div></div>
 </div>
 <script>
 const E=id=>document.getElementById(id);
@@ -2214,6 +2220,16 @@ async function tick(){
   E('messages').innerHTML=d.messages.slice(-40).map(x=>`<div class="msg"><span class="who">${esc(x.from)}</span>: ${men(x.text)}</div>`).reverse().join('')||'<div class="msg">none</div>';
   if(d.debate){const dd=d.debate;E('debate').innerHTML=`<b>${esc(dd.topic)}</b><br><span class="pill">${dd.phase}</span> <span class="pill">round ${dd.round+1}/${dd.max_rounds}</span> <span class="pill">judge ${dd.judge_role}</span>`+ (dd.verdict?`<br><br>✅ <b>${esc(dd.verdict.decision)}</b>`:'');}else{E('debate').innerHTML='<span class="s-todo">No active debate</span>';}
   E('timeline').innerHTML=d.timeline.slice(-25).map(e=>`<div class="ev"><span class="s-todo">${e.time.split(' ')[1]||e.time}</span> ${esc(e.who)}: ${esc(e.action)}</div>`).reverse().join('')||'<div class="ev">none</div>';
+  const F=d.findings||[],closed=['fixed','verified','false_positive','wont_fix'];
+  const sev={critical:0,high:0,medium:0,low:0,info:0};F.forEach(f=>{if(sev[f.severity]!==undefined)sev[f.severity]++;});
+  const openF=F.filter(f=>!closed.includes(f.status)).length;
+  E('findings').innerHTML=F.length?`<div class="row sub">${F.length} total · ${openF} open · <span class="sev-critical">${sev.critical}C</span> <span class="sev-high">${sev.high}H</span> <span class="sev-medium">${sev.medium}M</span> <span class="sev-low">${sev.low}L</span></div>`+F.slice(-12).reverse().map(f=>`<div class="row"><span class="sev-${f.severity}">●</span> #${f.id} ${esc(f.title)} <span class="pill">${f.status}</span> ${f.location?'<span class="sub">'+esc(f.location)+'</span>':''}</div>`).join(''):'<div class="row sub">no findings — clean ✓</div>';
+  const M=d.memory||{};
+  E('memory').innerHTML=`<div class="metrics">`+[['notes','Notes'],['facts','Facts'],['summaries','Summaries'],['brain','Brain']].map(([k,l])=>`<div class="metric"><div class="n">${M[k]||0}</div><div class="l">${l}</div></div>`).join('')+`</div>`;
+  const R=d.reliability||{},ag=Object.values(d.agents),up=ag.filter(a=>['online','idle','busy'].includes(a.status||'online')).length,rc=Object.entries(R.receipts||{});
+  E('reliability').innerHTML=`<div class="row">Backups: <b>${R.backups||0}</b> ${R.last_backup?'<span class="sub">latest '+esc(R.last_backup)+'</span>':''}</div><div class="row">Agents healthy: <b>${up}/${ag.length}</b></div><div class="row sub">Read receipts (last msg seen):</div>`+(rc.length?rc.map(([r,i])=>`<div class="row">${esc(r)} <span class="pill">@${i}</span></div>`).join(''):'<div class="row sub">none yet</div>');
+  const W=d.workflow||{},sk=Object.entries(W.skills||{}),vt=Object.entries(W.votes||{});
+  E('workflow').innerHTML=`<div class="row sub">Skills:</div>`+(sk.length?sk.map(([r,s])=>`<div class="row">${esc(r)}: ${(s||[]).map(x=>'<span class="pill">'+esc(x)+'</span>').join(' ')}</div>`).join(''):'<div class="row sub">none set</div>')+`<div class="row sub">Templates: ${(W.templates||[]).map(esc).join(', ')||'none'}</div>`+(vt.length?`<div class="row sub">Votes:</div>`+vt.map(([r,v])=>`<div class="row">${esc(r)} → ${esc(v.choice)}</div>`).join(''):'');
   E('updated').textContent='live · updated '+new Date().toLocaleTimeString();
  }catch(e){E('updated').textContent='disconnected — retrying…';}
 }
@@ -2228,6 +2244,12 @@ class _DashHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/state"):
             state = _read_state_unlocked()
+            try:
+                brain_notes = len(_brain_load().get("notes", []))
+            except Exception:
+                brain_notes = 0
+            backups = _list_backups()
+            debate = state.get("debate") or {}
             payload = {
                 "metrics": _compute_metrics(state),
                 "agents": state.get("agents", {}),
@@ -2235,6 +2257,23 @@ class _DashHandler(BaseHTTPRequestHandler):
                 "messages": state.get("messages", []),
                 "debate": state.get("debate"),
                 "timeline": state.get("activity_log", []),
+                "findings": state.get("findings", []),
+                "memory": {
+                    "notes": len(state.get("notes", [])),
+                    "facts": len(state.get("facts", {})),
+                    "summaries": len(state.get("summaries", [])),
+                    "brain": brain_notes,
+                },
+                "reliability": {
+                    "backups": len(backups),
+                    "last_backup": (backups[-1].name if backups else ""),
+                    "receipts": state.get("read_state", {}),
+                },
+                "workflow": {
+                    "skills": state.get("skills", {}),
+                    "templates": list(state.get("templates", {}).keys()),
+                    "votes": debate.get("votes", {}),
+                },
             }
             body = json.dumps(payload).encode("utf-8")
             self.send_response(200)
