@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented here.
 
+## v8.0
+- **Added — MCP Hub / Gateway (21 tools):** the server can now act as a
+  router/proxy in front of other tools. Register downstream MCP servers and REST
+  APIs as targets and reach them all through one hub connection.
+  - Registry & discovery: `gateway_register_rest`, `gateway_register_mcp`,
+    `gateway_unregister`, `gateway_toggle`, `gateway_list_targets`,
+    `gateway_describe`, `gateway_discover`, `gateway_capabilities`.
+  - **Unified auth:** secrets are stored in a separate, `chmod 600` vault
+    (`gateway_set_credential`, `gateway_list_credentials`,
+    `gateway_delete_credential`), masked everywhere, and injected by the hub at
+    call time so agents never see API keys.
+  - **Routing rules:** `gateway_add_route`, `gateway_remove_route`,
+    `gateway_list_routes`, `gateway_route` (priority + tag matching).
+  - **Rate-limiting + audit:** per-agent/per-target limits (`gateway_set_limit`)
+    and a central audit trail (`gateway_audit`, `gateway_usage`).
+  - **Proxy:** `gateway_call_rest` (REST, std-lib only) and `gateway_call_tool`
+    (spawns a downstream MCP server, handshakes, forwards the call).
+  - **Auto-Adapter Generator:** `gateway_generate_adapter` turns an
+    OpenAPI/Swagger spec (inline / file / URL) into a complete, runnable MCP
+    server and auto-registers it as a hub target.
+  - **Dashboard:** new `/gateway` view (targets, routes, usage, vault keys,
+    audit) linked from the team dashboard.
+  - Gateway state lives in its own file (`GATEWAY_FILE`) so it survives
+    `reset_team`. New env vars: `GATEWAY_FILE`, `GATEWAY_VAULT_FILE`,
+    `ADAPTER_DIR`, `GATEWAY_RATE_PER_MIN`, `GATEWAY_AUDIT_LIMIT`,
+    `GATEWAY_CALL_TIMEOUT`, `GATEWAY_MAX_OPS`.
+
 ## v7.0
 - **Added — Security audit workflow:** `report_finding`, `list_findings`,
   `get_finding`, `triage_finding`, `assign_fix`, `verify_fix`, `security_report`,

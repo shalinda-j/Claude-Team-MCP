@@ -17,6 +17,8 @@ Beyond simple messaging, agents can **debate** a decision (propose → critique 
 
 Everything is coordinated through a single shared state file, so any number of clients — even different CLIs — that point at the same file join the same world.
 
+It also ships with a built-in **MCP Hub / Gateway**: one server that acts as a router/proxy for *other* tools. Register downstream MCP servers and REST APIs as "targets", and any agent connects once to the hub to reach all of them — with credentials held centrally (agents never see the keys), unified tool discovery, per-agent rate limits, a central audit trail, and routing rules. An **Auto-Adapter Generator** turns any OpenAPI/Swagger spec into a ready-to-run MCP server, so wrapping a new API takes seconds instead of hand-writing an adapter.
+
 ## Why it exists
 
 A single agent has one perspective and one context window. Real engineering work benefits from division of labor, review, and disagreement. This project provides the missing coordination layer so independent agents can:
@@ -45,6 +47,10 @@ A single agent has one perspective and one context window. Real engineering work
 - **Intelligence** — meaning-based search across memory, smart task routing, conflict detection, debate scoring, and token-saving context checkpoints.
 - **Integration** — Obsidian export, git branch/commit linking, worktree suggestions, and Slack/Discord/Teams webhooks.
 - **Security audit** — security-role agents can find, triage, fix, and verify vulnerabilities in your own project and produce a report.
+- **MCP Hub / Gateway** — register downstream MCP servers and REST APIs as targets; one hub connection fans out to all of them, with tool discovery (`gateway_capabilities`), routing rules, and a `/gateway` dashboard view.
+- **Unified auth** — secrets live in a separate, owner-only (`chmod 600`) vault; the hub injects them at call time so agents never handle API keys.
+- **Rate-limiting + audit** — per-agent, per-target call limits and a central audit trail (who called what, when, status, latency) — useful for governance and security review.
+- **Auto-Adapter Generator** — point `gateway_generate_adapter` at an OpenAPI/Swagger spec (inline, file, or URL) and it writes a complete, runnable MCP server and auto-registers it as a hub target.
 
 ## Requirements
 
@@ -139,7 +145,7 @@ The agents now coordinate through the shared channel and board.
 
 ## Tools
 
-The server exposes 73 tools, grouped by purpose.
+The server exposes 94 tools, grouped by purpose.
 
 ### Team coordination
 `join_team`, `post_message`, `read_channel`, `wait_for_message`, `add_task`, `update_task`, `view_board`
@@ -177,6 +183,13 @@ The server exposes 73 tools, grouped by purpose.
 ### Security audit
 `report_finding`, `list_findings`, `get_finding`, `triage_finding`, `assign_fix`, `verify_fix`, `security_report`, `start_security_audit`
 
+### MCP Hub / Gateway
+Registry & discovery: `gateway_register_rest`, `gateway_register_mcp`, `gateway_unregister`, `gateway_toggle`, `gateway_list_targets`, `gateway_describe`, `gateway_discover`, `gateway_capabilities`
+Unified auth: `gateway_set_credential`, `gateway_list_credentials`, `gateway_delete_credential`
+Routing: `gateway_add_route`, `gateway_remove_route`, `gateway_list_routes`, `gateway_route`
+Limits & audit: `gateway_set_limit`, `gateway_audit`, `gateway_usage`
+Proxy & generator: `gateway_call_rest`, `gateway_call_tool`, `gateway_generate_adapter`
+
 ### Reset
 `reset_team`
 
@@ -192,6 +205,53 @@ Security-Lead: triage, then assign_fix to a developer agent.
 Auditor: verify_fix after the fix, then security_report.
 ```
 
+## MCP Hub / Gateway
+
+Instead of registering a separate MCP server for every technology, register the
+hub once in your client and let it route to everything else. Other MCP servers
+and REST APIs become **targets**; agents reach them all through the hub.
+
+```
+# 1. Store a secret in the vault (agents never see it again)
+PM: gateway_set_credential("weather_key", "<your-api-key>")
+
+# 2a. Register a REST API as a target...
+PM: gateway_register_rest("weather", "https://api.example.com/v1",
+       auth_type="query", auth_name="appid", credential_key="weather_key",
+       tags="weather,forecast")
+
+# 2b. ...or register another MCP server as a target
+PM: gateway_register_mcp("github", "npx", args="-y @modelcontextprotocol/server-github",
+       env='{"GITHUB_TOKEN":"vault:gh_token"}', tags="git,issues")
+PM: gateway_discover("github")          # cache its tool list
+
+# 3. Any agent asks the hub what it can do, then calls through it
+Backend: gateway_capabilities("weather")
+Backend: gateway_call_rest("weather", path="/forecast", query="city=London", agent="Backend")
+Backend: gateway_call_tool("github", "create_issue", arguments='{"title":"Bug"}', agent="Backend")
+```
+
+The hub injects the stored credential at call time, enforces a per-agent rate
+limit, and records every call to a central audit trail (`gateway_audit`,
+`gateway_usage`, and the `/gateway` dashboard view).
+
+### Auto-Adapter Generator
+
+Point it at an OpenAPI/Swagger spec and it writes a complete MCP server — one
+tool per operation — and registers it as a hub target automatically:
+
+```
+PM: gateway_generate_adapter("https://petstore3.swagger.io/api/v3/openapi.json",
+       name="petstore", credential_key="petstore_key")
+# -> Generated MCP adapter 'petstore' with N tools -> .../adapters/petstore.py
+#    Registered REST target 'petstore'.
+```
+
+The `spec` argument accepts an inline JSON string, a local file path, or a URL
+(JSON specs work out of the box; YAML needs `PyYAML`). See
+[`examples/petstore_openapi.json`](examples/petstore_openapi.json) and the
+[gateway quick-start](examples/gateway_quickstart.md).
+
 ## Configuration
 
 All settings are environment variables, set when you register the server.
@@ -204,12 +264,21 @@ All settings are environment variables, set when you register the server.
 | `AGENT_STALE_SECONDS` | `300` | Idle time before an agent is marked offline. |
 | `MSG_ROTATE_LIMIT` | `2000` | Channel size before old messages are archived out. |
 | `LOG_ROTATE_LIMIT` | `2000` | Activity-log size cap. |
+| `GATEWAY_FILE` | `<state dir>/gateway.json` | Hub registry/routes/audit (kept out of team state and resets). |
+| `GATEWAY_VAULT_FILE` | `<state dir>/gateway_vault.json` | Secret vault (written `chmod 600`). |
+| `ADAPTER_DIR` | `<state dir>/adapters` | Where `gateway_generate_adapter` writes generated servers. |
+| `GATEWAY_RATE_PER_MIN` | `60` | Default per-agent, per-target call limit. |
+| `GATEWAY_AUDIT_LIMIT` | `2000` | Gateway audit-trail size cap. |
+| `GATEWAY_CALL_TIMEOUT` | `30` | Timeout (s) for proxied REST calls. |
+| `GATEWAY_MAX_OPS` | `150` | Max operations generated from one OpenAPI spec. |
 
 ## How it works
 
 The server keeps all team state in a single JSON file. Every read is direct; every write happens under a file lock and is written atomically (temp file + rename), so concurrent agents — even in different CLIs — never clobber each other. The second brain lives in its own locked file on disk and is never touched by team resets.
 
 `wait_for_message` implements lightweight long-polling with adaptive back-off: an agent calling it blocks until a new message appears, giving real-time conversation without busy-waiting.
+
+The **hub/gateway** keeps its registry, routes, and audit trail in their own locked file (`GATEWAY_FILE`), separate from team state so it survives `reset_team`. Secrets live in a separate `chmod 600` vault and are referenced by key — they are masked in every tool response and on the dashboard, and injected only at call time. To proxy a downstream MCP server the hub acts as an MCP *client*: it spawns the server with the resolved credentials, performs the handshake, forwards the call, and logs the result. REST proxying and the adapter generator use only the standard library, so they work even where the MCP client extras are unavailable.
 
 ## Safety notes
 
@@ -222,14 +291,17 @@ The server keeps all team state in a single JSON file. Every read is direct; eve
 
 ```
 claude-team-mcp/
-├── team_coordinator.py     # the MCP server (all 35 tools)
+├── team_coordinator.py     # the MCP server (all 94 tools, incl. the hub/gateway)
 ├── requirements.txt
-├── examples/               # ready-to-copy client configs
+├── examples/               # ready-to-copy client configs + gateway quick-start
 │   ├── claude_code.md
 │   ├── cursor_mcp.json
 │   ├── codex_config.toml
-│   └── gemini_settings.json
+│   ├── gemini_settings.json
+│   ├── gateway_quickstart.md
+│   └── petstore_openapi.json
 ├── CHANGELOG.md
+├── FEATURES_GUIDE.md
 ├── LICENSE
 └── README.md
 ```

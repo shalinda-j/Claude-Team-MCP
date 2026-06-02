@@ -1,0 +1,53 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Petstore",
+    "version": "1.0.0",
+    "description": "A tiny sample OpenAPI spec to demo gateway_generate_adapter."
+  },
+  "servers": [{ "url": "https://petstore3.swagger.io/api/v3" }],
+  "components": {
+    "securitySchemes": {
+      "apiKey": { "type": "apiKey", "in": "header", "name": "api_key" }
+    }
+  },
+  "paths": {
+    "/pet/findByStatus": {
+      "get": {
+        "operationId": "findPetsByStatus",
+        "summary": "Find pets by status",
+        "parameters": [
+          { "name": "status", "in": "query", "required": false, "schema": { "type": "string" } }
+        ]
+      }
+    },
+    "/pet/{petId}": {
+      "get": {
+        "operationId": "getPetById",
+        "summary": "Find pet by ID",
+        "parameters": [
+          { "name": "petId", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ]
+      },
+      "delete": {
+        "operationId": "deletePet",
+        "summary": "Delete a pet",
+        "parameters": [
+          { "name": "petId", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ]
+      }
+    },
+    "/pet": {
+      "post": {
+        "operationId": "addPet",
+        "summary": "Add a new pet to the store"
+      }
+    },
+    "/store/inventory": {
+      "get": {
+        "operationId": "getInventory",
+        "summary": "Returns pet inventories by status"
+      }
+    }
+  }
+}

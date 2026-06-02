@@ -2181,6 +2181,8 @@ h1{font-size:18px;margin-bottom:4px}
 .online{background:var(--green)}.idle{background:var(--accent)}.busy{background:var(--amber)}.offline{background:var(--dim)}
 .pill{font-size:10px;padding:1px 6px;border-radius:10px;background:#21262d;color:var(--dim);margin-left:4px}
 .s-done{color:var(--green)}.s-progress{color:var(--amber)}.s-blocked{color:var(--red)}.s-todo{color:var(--dim)}
+.row{padding:6px 0;border-bottom:1px solid var(--border);font-size:13px}.row:last-child{border:none}
+.sev-critical{color:#f85149}.sev-high{color:#ff7b72}.sev-medium{color:var(--amber)}.sev-low{color:var(--green)}.sev-info{color:var(--dim)}
 .msg .who{color:var(--accent);font-weight:600}
 .mention{color:var(--amber)}
 .scroll{max-height:340px;overflow-y:auto}
@@ -2188,7 +2190,7 @@ h1{font-size:18px;margin-bottom:4px}
 .bar>div{height:100%;background:var(--green)}
 .full{grid-column:1/-1}
 </style></head><body>
-<h1>🤖 Team Dashboard</h1>
+<h1>🤖 Team Dashboard <a href="/gateway" style="font-size:13px;color:#58a6ff;text-decoration:none">Gateway →</a></h1>
 <div class="sub" id="updated">connecting…</div>
 <div class="grid">
   <div class="card full"><h2>Metrics</h2><div class="metrics" id="metrics"></div><div class="bar"><div id="progbar" style="width:0%"></div></div></div>
@@ -2197,6 +2199,10 @@ h1{font-size:18px;margin-bottom:4px}
   <div class="card"><h2>Channel</h2><div class="scroll" id="messages"></div></div>
   <div class="card"><h2>Debate</h2><div id="debate"></div></div>
   <div class="card"><h2>Timeline</h2><div class="scroll" id="timeline"></div></div>
+  <div class="card"><h2>Security findings</h2><div class="scroll" id="findings"></div></div>
+  <div class="card"><h2>Memory</h2><div id="memory"></div></div>
+  <div class="card"><h2>Reliability &amp; health</h2><div class="scroll" id="reliability"></div></div>
+  <div class="card"><h2>Workflow</h2><div class="scroll" id="workflow"></div></div>
 </div>
 <script>
 const E=id=>document.getElementById(id);
@@ -2214,6 +2220,16 @@ async function tick(){
   E('messages').innerHTML=d.messages.slice(-40).map(x=>`<div class="msg"><span class="who">${esc(x.from)}</span>: ${men(x.text)}</div>`).reverse().join('')||'<div class="msg">none</div>';
   if(d.debate){const dd=d.debate;E('debate').innerHTML=`<b>${esc(dd.topic)}</b><br><span class="pill">${dd.phase}</span> <span class="pill">round ${dd.round+1}/${dd.max_rounds}</span> <span class="pill">judge ${dd.judge_role}</span>`+ (dd.verdict?`<br><br>✅ <b>${esc(dd.verdict.decision)}</b>`:'');}else{E('debate').innerHTML='<span class="s-todo">No active debate</span>';}
   E('timeline').innerHTML=d.timeline.slice(-25).map(e=>`<div class="ev"><span class="s-todo">${e.time.split(' ')[1]||e.time}</span> ${esc(e.who)}: ${esc(e.action)}</div>`).reverse().join('')||'<div class="ev">none</div>';
+  const F=d.findings||[],closed=['fixed','verified','false_positive','wont_fix'];
+  const sev={critical:0,high:0,medium:0,low:0,info:0};F.forEach(f=>{if(sev[f.severity]!==undefined)sev[f.severity]++;});
+  const openF=F.filter(f=>!closed.includes(f.status)).length;
+  E('findings').innerHTML=F.length?`<div class="row sub">${F.length} total · ${openF} open · <span class="sev-critical">${sev.critical}C</span> <span class="sev-high">${sev.high}H</span> <span class="sev-medium">${sev.medium}M</span> <span class="sev-low">${sev.low}L</span></div>`+F.slice(-12).reverse().map(f=>`<div class="row"><span class="sev-${f.severity}">●</span> #${f.id} ${esc(f.title)} <span class="pill">${f.status}</span> ${f.location?'<span class="sub">'+esc(f.location)+'</span>':''}</div>`).join(''):'<div class="row sub">no findings — clean ✓</div>';
+  const M=d.memory||{};
+  E('memory').innerHTML=`<div class="metrics">`+[['notes','Notes'],['facts','Facts'],['summaries','Summaries'],['brain','Brain']].map(([k,l])=>`<div class="metric"><div class="n">${M[k]||0}</div><div class="l">${l}</div></div>`).join('')+`</div>`;
+  const R=d.reliability||{},ag=Object.values(d.agents),up=ag.filter(a=>['online','idle','busy'].includes(a.status||'online')).length,rc=Object.entries(R.receipts||{});
+  E('reliability').innerHTML=`<div class="row">Backups: <b>${R.backups||0}</b> ${R.last_backup?'<span class="sub">latest '+esc(R.last_backup)+'</span>':''}</div><div class="row">Agents healthy: <b>${up}/${ag.length}</b></div><div class="row sub">Read receipts (last msg seen):</div>`+(rc.length?rc.map(([r,i])=>`<div class="row">${esc(r)} <span class="pill">@${i}</span></div>`).join(''):'<div class="row sub">none yet</div>');
+  const W=d.workflow||{},sk=Object.entries(W.skills||{}),vt=Object.entries(W.votes||{});
+  E('workflow').innerHTML=`<div class="row sub">Skills:</div>`+(sk.length?sk.map(([r,s])=>`<div class="row">${esc(r)}: ${(s||[]).map(x=>'<span class="pill">'+esc(x)+'</span>').join(' ')}</div>`).join(''):'<div class="row sub">none set</div>')+`<div class="row sub">Templates: ${(W.templates||[]).map(esc).join(', ')||'none'}</div>`+(vt.length?`<div class="row sub">Votes:</div>`+vt.map(([r,v])=>`<div class="row">${esc(r)} → ${esc(v.choice)}</div>`).join(''):'');
   E('updated').textContent='live · updated '+new Date().toLocaleTimeString();
  }catch(e){E('updated').textContent='disconnected — retrying…';}
 }
@@ -2228,6 +2244,12 @@ class _DashHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/state"):
             state = _read_state_unlocked()
+            try:
+                brain_notes = len(_brain_load().get("notes", []))
+            except Exception:
+                brain_notes = 0
+            backups = _list_backups()
+            debate = state.get("debate") or {}
             payload = {
                 "metrics": _compute_metrics(state),
                 "agents": state.get("agents", {}),
@@ -2235,11 +2257,43 @@ class _DashHandler(BaseHTTPRequestHandler):
                 "messages": state.get("messages", []),
                 "debate": state.get("debate"),
                 "timeline": state.get("activity_log", []),
+                "findings": state.get("findings", []),
+                "memory": {
+                    "notes": len(state.get("notes", [])),
+                    "facts": len(state.get("facts", {})),
+                    "summaries": len(state.get("summaries", [])),
+                    "brain": brain_notes,
+                },
+                "reliability": {
+                    "backups": len(backups),
+                    "last_backup": (backups[-1].name if backups else ""),
+                    "receipts": state.get("read_state", {}),
+                },
+                "workflow": {
+                    "skills": state.get("skills", {}),
+                    "templates": list(state.get("templates", {}).keys()),
+                    "votes": debate.get("votes", {}),
+                },
             }
             body = json.dumps(payload).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path.startswith("/api/gateway"):
+            body = json.dumps(_gw_dashboard_payload()).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path.startswith("/gateway"):
+            body = _gateway_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -2748,6 +2802,1179 @@ def reset_team(keep_memory: bool = False) -> str:
         return "Channel, board, roster, spawn list cleared. Memory kept. Second brain untouched."
     _save(_default_state())
     return "Team state fully reset. Second brain on disk is untouched."
+
+
+# ============================================================================
+# BATCH F — MCP HUB / GATEWAY
+# A single MCP server that acts as a router/proxy. Other MCP servers and REST
+# APIs register as "targets"; any agent connects once to the hub and reaches all
+# of them. The hub holds the credentials (agents never see keys), enforces rate
+# limits, keeps a central audit trail, routes requests, and can AUTO-GENERATE a
+# full MCP adapter from an OpenAPI/Swagger spec.
+# ============================================================================
+
+import asyncio as _asyncio
+import base64 as _b64
+import collections as _collections
+import keyword as _keyword
+import urllib.parse as _urlparse
+
+# The hub acts as an MCP *client* to downstream MCP servers. Import lazily so the
+# server still runs (REST + generator + registry) even if the client extras are
+# unavailable in this Python environment.
+try:
+    from mcp import ClientSession as _ClientSession, StdioServerParameters as _StdioParams
+    from mcp.client.stdio import stdio_client as _stdio_client
+    _HAS_MCP_CLIENT = True
+except Exception:
+    _HAS_MCP_CLIENT = False
+
+# --- Gateway storage (kept separate from team state so it survives reset_team
+#     and so secrets live in their own chmod-600 vault, never in team state) ---
+GATEWAY_FILE = Path(os.environ.get("GATEWAY_FILE", str(STATE_FILE.parent / "gateway.json")))
+GATEWAY_LOCK = Path(str(GATEWAY_FILE) + ".lock")
+GATEWAY_VAULT = Path(os.environ.get("GATEWAY_VAULT_FILE", str(STATE_FILE.parent / "gateway_vault.json")))
+GATEWAY_VAULT_LOCK = Path(str(GATEWAY_VAULT) + ".lock")
+ADAPTER_DIR = Path(os.environ.get("ADAPTER_DIR", str(STATE_FILE.parent / "adapters")))
+GATEWAY_RATE_DEFAULT = int(os.environ.get("GATEWAY_RATE_PER_MIN", "60"))
+GATEWAY_AUDIT_LIMIT = int(os.environ.get("GATEWAY_AUDIT_LIMIT", "2000"))
+GATEWAY_CALL_TIMEOUT = int(os.environ.get("GATEWAY_CALL_TIMEOUT", "30"))
+GATEWAY_MAX_OPS = int(os.environ.get("GATEWAY_MAX_OPS", "150"))
+
+# In-memory sliding-window rate counters (the hub is a single long-lived process,
+# so this avoids write-amplifying the audit file on every call).
+_GW_RATE = _collections.defaultdict(_collections.deque)
+_GW_RATE_LOCK = threading.Lock()
+
+
+def _gw_default() -> dict:
+    return {
+        "targets": {},   # name -> target definition (rest | mcp)
+        "routes": [],    # [{pattern, target, priority}]
+        "limits": {"default": {"per_minute": GATEWAY_RATE_DEFAULT}, "targets": {}},
+        "audit": [],     # [{time, agent, target, op, status, ms, ok}]
+        "stats": {},     # target -> {calls, errors, last}
+    }
+
+
+def _gw_load() -> dict:
+    gw = _gw_default()
+    if GATEWAY_FILE.exists():
+        try:
+            loaded = json.loads(GATEWAY_FILE.read_text(encoding="utf-8"))
+            gw.update(loaded)
+            for k, v in _gw_default().items():
+                gw.setdefault(k, v)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return gw
+
+
+def _gw_mutate(fn):
+    """Locked read-modify-write for the gateway registry/audit."""
+    GATEWAY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with _Lock(GATEWAY_LOCK):
+        gw = _gw_load()
+        result = fn(gw)
+        _atomic_write(GATEWAY_FILE, json.dumps(gw, indent=2, ensure_ascii=False))
+        return result
+
+
+def _vault_load() -> dict:
+    if GATEWAY_VAULT.exists():
+        try:
+            return json.loads(GATEWAY_VAULT.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _vault_mutate(fn):
+    GATEWAY_VAULT.parent.mkdir(parents=True, exist_ok=True)
+    with _Lock(GATEWAY_VAULT_LOCK):
+        vault = _vault_load()
+        result = fn(vault)
+        _atomic_write(GATEWAY_VAULT, json.dumps(vault, indent=2, ensure_ascii=False))
+        try:
+            os.chmod(GATEWAY_VAULT, 0o600)  # owner-only; best effort
+        except OSError:
+            pass
+        return result
+
+
+def _gw_mask(v) -> str:
+    v = str(v or "")
+    if not v:
+        return ""
+    return "****" if len(v) <= 4 else "****" + v[-4:]
+
+
+def _gw_mask_val(v) -> str:
+    v = str(v)
+    return v if v.startswith("vault:") else _gw_mask(v)  # vault: references aren't secret
+
+
+def _gw_audit(gw: dict, agent: str, target: str, op: str, status, ms: float = 0, ok: bool = True) -> None:
+    gw.setdefault("audit", []).append({
+        "time": _now(), "agent": agent or "anon", "target": target,
+        "op": op, "status": str(status)[:120], "ms": int(ms), "ok": bool(ok),
+    })
+    if len(gw["audit"]) > GATEWAY_AUDIT_LIMIT:
+        gw["audit"] = gw["audit"][-GATEWAY_AUDIT_LIMIT:]
+    st = gw.setdefault("stats", {}).setdefault(target, {"calls": 0, "errors": 0, "last": ""})
+    st["calls"] += 1
+    if not ok:
+        st["errors"] += 1
+    st["last"] = _now()
+
+
+def _effective_limit(gw: dict, target: str) -> int:
+    lims = gw.get("limits", {})
+    tl = lims.get("targets", {}).get(target)
+    if isinstance(tl, dict) and "per_minute" in tl:
+        return int(tl["per_minute"])
+    d = lims.get("default", {})
+    if isinstance(d, dict) and "per_minute" in d:
+        return int(d["per_minute"])
+    return GATEWAY_RATE_DEFAULT
+
+
+def _gw_rate(agent: str, target: str, limit_per_min: int):
+    """Sliding-window check. Returns (allowed, retry_after_seconds)."""
+    if not limit_per_min or limit_per_min <= 0:
+        return True, 0
+    key = f"{agent or 'anon'}|{target}"
+    now = _ts()
+    with _GW_RATE_LOCK:
+        dq = _GW_RATE[key]
+        while dq and (now - dq[0]) > 60:
+            dq.popleft()
+        if len(dq) >= limit_per_min:
+            return False, max(1, int(60 - (now - dq[0])))
+        dq.append(now)
+        return True, 0
+
+
+# --- small arg parsers (accept JSON or friendly shorthand) ---
+def _gw_list(s):
+    if isinstance(s, list):
+        return [str(x) for x in s]
+    s = (s or "").strip()
+    if not s:
+        return []
+    if s.startswith("["):
+        try:
+            v = json.loads(s)
+            if isinstance(v, list):
+                return [str(x) for x in v]
+        except Exception:
+            pass
+    return [x.strip() for x in s.split(",") if x.strip()] if "," in s else s.split()
+
+
+def _gw_obj(s):
+    if isinstance(s, dict):
+        return s
+    s = (s or "").strip()
+    if not s:
+        return {}
+    try:
+        v = json.loads(s)
+        return v if isinstance(v, dict) else {}
+    except Exception:
+        return {}
+
+
+def _gw_qs(s):
+    s = (s or "").strip()
+    if not s:
+        return {}
+    if s.startswith("{"):
+        return {str(k): str(v) for k, v in _gw_obj(s).items()}
+    return dict(_urlparse.parse_qsl(s, keep_blank_values=True))
+
+
+def _gw_resolve_env(env_map) -> dict:
+    """Resolve a target's env map, expanding "vault:KEY" values from the secret vault."""
+    vault = _vault_load()
+    out = {}
+    for k, v in (env_map or {}).items():
+        if isinstance(v, str) and v.startswith("vault:"):
+            out[str(k)] = vault.get(v[6:], "")
+        else:
+            out[str(k)] = str(v)
+    return out
+
+
+# ============================================================================
+# Downstream MCP client plumbing (sync wrappers around the async stdio client)
+# ============================================================================
+
+async def _gw_mcp_do(command, args, env, action):
+    # No configured env -> inherit the SDK's safe default environment (keeps PATH etc).
+    # Configured env -> layer it ON TOP of that default so we add a token without
+    # wiping the variables the downstream process needs to start.
+    full_env = None
+    if env:
+        try:
+            from mcp.client.stdio import get_default_environment as _gde
+            full_env = {**_gde(), **env}
+        except Exception:
+            full_env = {**os.environ, **env}
+    params = _StdioParams(command=command, args=list(args or []), env=full_env)
+    async with _stdio_client(params) as (read, write):
+        async with _ClientSession(read, write) as session:
+            await session.initialize()
+            return await action(session)
+
+
+def _gw_run(coro):
+    """Run an async coroutine to completion from a synchronous MCP tool."""
+    try:
+        _asyncio.get_running_loop()
+        in_loop = True
+    except RuntimeError:
+        in_loop = False
+    if not in_loop:
+        return _asyncio.run(coro)
+    import concurrent.futures as _cf
+    with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(lambda: _asyncio.run(coro)).result()
+
+
+def _gw_ser_tools(res):
+    out = []
+    for t in getattr(res, "tools", []) or []:
+        out.append({"name": getattr(t, "name", "?"),
+                    "description": (getattr(t, "description", "") or "")[:200]})
+    return out
+
+
+def _gw_ser_content(res):
+    parts = []
+    for c in getattr(res, "content", []) or []:
+        txt = getattr(c, "text", None)
+        parts.append(txt if txt is not None else str(c))
+    return "\n".join(parts) if parts else "(no content)"
+
+
+# ============================================================================
+# Registration & discovery
+# ============================================================================
+
+@mcp.tool()
+def gateway_register_rest(name: str, base_url: str, description: str = "",
+                          auth_type: str = "none", auth_name: str = "",
+                          credential_key: str = "", tags: str = "",
+                          default_headers: str = "", by_role: str = "") -> str:
+    """Register a REST API as a hub target. Agents then call it via gateway_call_rest
+    WITHOUT ever seeing the credential -- the hub injects it at call time.
+
+    Args:
+        name: Unique target name, e.g. "stripe".
+        base_url: Base URL, e.g. "https://api.stripe.com/v1".
+        description: What this API does.
+        auth_type: none | header | bearer | query | basic.
+        auth_name: Header/query name for auth_type header|query (e.g. "X-API-Key").
+        credential_key: Vault key holding the secret (set via gateway_set_credential).
+        tags: Comma-separated routing tags, e.g. "payments,billing".
+        default_headers: JSON object of headers always sent.
+        by_role: Your role.
+    """
+    if not name or not base_url:
+        return "name and base_url are required."
+
+    def op(gw):
+        existed = name in gw["targets"]
+        gw["targets"][name] = {
+            "kind": "rest", "description": description, "tags": _gw_list(tags),
+            "base_url": base_url,
+            "auth": {"type": auth_type, "name": auth_name, "credential": credential_key},
+            "default_headers": _gw_obj(default_headers), "enabled": True,
+            "registered_by": by_role or "gateway", "registered_at": _now(),
+        }
+        _gw_audit(gw, by_role, name, "register_rest", "ok")
+        return existed
+
+    existed = _gw_mutate(op)
+    note = ""
+    if auth_type != "none" and not credential_key:
+        note = " (set credential_key + gateway_set_credential so the hub can authenticate)"
+    return f"{'Updated' if existed else 'Registered'} REST target '{name}' -> {base_url} [auth: {auth_type}]{note}."
+
+
+@mcp.tool()
+def gateway_register_mcp(name: str, command: str, args: str = "", description: str = "",
+                         env: str = "", tags: str = "", by_role: str = "") -> str:
+    """Register a downstream MCP server as a hub target. Agents reach all of its tools
+    through gateway_call_tool -- one hub connection fans out to many servers.
+
+    Args:
+        name: Unique target name, e.g. "github".
+        command: Executable, e.g. "python" or "npx".
+        args: Args as JSON list or space/comma-separated, e.g. "-y @some/mcp-server".
+        description: What this server provides.
+        env: JSON object of env vars. Use a "vault:KEY" value to inject a stored secret
+             without writing it into config, e.g. {"TOKEN":"vault:gh_token"}.
+        tags: Comma-separated routing tags.
+        by_role: Your role.
+    """
+    if not name or not command:
+        return "name and command are required."
+
+    def op(gw):
+        existed = name in gw["targets"]
+        gw["targets"][name] = {
+            "kind": "mcp", "description": description, "tags": _gw_list(tags),
+            "command": command, "args": _gw_list(args), "env": _gw_obj(env),
+            "capabilities": [], "enabled": True,
+            "registered_by": by_role or "gateway", "registered_at": _now(),
+        }
+        _gw_audit(gw, by_role, name, "register_mcp", "ok")
+        return existed
+
+    existed = _gw_mutate(op)
+    tip = " Run gateway_discover to fetch its tool list." if _HAS_MCP_CLIENT else ""
+    return f"{'Updated' if existed else 'Registered'} MCP target '{name}' (command: {command} {' '.join(_gw_list(args))}).{tip}"
+
+
+@mcp.tool()
+def gateway_unregister(name: str, by_role: str = "") -> str:
+    """Remove a registered target (and any routes pointing at it) from the hub."""
+    def op(gw):
+        if name not in gw["targets"]:
+            return False
+        del gw["targets"][name]
+        gw["routes"] = [r for r in gw.get("routes", []) if r.get("target") != name]
+        _gw_audit(gw, by_role, name, "unregister", "ok")
+        return True
+    return f"Removed target '{name}'." if _gw_mutate(op) else f"No target '{name}'."
+
+
+@mcp.tool()
+def gateway_toggle(name: str, enabled: bool = True, by_role: str = "") -> str:
+    """Enable or disable a target without deleting its config.
+
+    Args:
+        name: Target name.
+        enabled: True to enable, False to disable.
+        by_role: Your role.
+    """
+    def op(gw):
+        if name not in gw["targets"]:
+            return None
+        gw["targets"][name]["enabled"] = bool(enabled)
+        _gw_audit(gw, by_role, name, "enable" if enabled else "disable", "ok")
+        return True
+    r = _gw_mutate(op)
+    if r is None:
+        return f"No target '{name}'."
+    return f"Target '{name}' is now {'enabled' if enabled else 'disabled'}."
+
+
+@mcp.tool()
+def gateway_list_targets(tag: str = "", kind: str = "") -> str:
+    """List registered targets (credentials are never shown).
+
+    Args:
+        tag: Filter by routing tag.
+        kind: Filter by kind: rest | mcp.
+    """
+    gw = _gw_load()
+    targets = gw.get("targets", {})
+    if not targets:
+        return ("No targets registered. Use gateway_register_rest / gateway_register_mcp, "
+                "or gateway_generate_adapter to build one from an OpenAPI spec.")
+    out = [f"=== HUB TARGETS ({len(targets)}) ==="]
+    for n, t in sorted(targets.items()):
+        if tag and tag not in t.get("tags", []):
+            continue
+        if kind and t.get("kind") != kind:
+            continue
+        caps = len(t.get("capabilities", [])) or len(t.get("operations", []))
+        flag = "" if t.get("enabled", True) else " [disabled]"
+        where = t.get("base_url") or (t.get("command", "") + " " + " ".join(t.get("args", []))).strip()
+        tg = (" {" + ",".join(t.get("tags", [])) + "}") if t.get("tags") else ""
+        out.append(f"  - {n} [{t.get('kind')}]{flag} -> {where}  ({caps} ops){tg}")
+        if t.get("description"):
+            out.append(f"      {t['description']}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def gateway_describe(name: str) -> str:
+    """Show full config + cached capabilities for one target (credential masked)."""
+    gw = _gw_load()
+    t = gw.get("targets", {}).get(name)
+    if not t:
+        return f"No target '{name}'."
+    out = [f"=== {name} [{t.get('kind')}] ===",
+           f"  description: {t.get('description', '')}",
+           f"  tags: {', '.join(t.get('tags', [])) or '-'}",
+           f"  enabled: {t.get('enabled', True)}",
+           f"  registered: {t.get('registered_at', '?')} by {t.get('registered_by', '?')}"]
+    if t.get("kind") == "rest":
+        a = t.get("auth", {})
+        out.append(f"  base_url: {t.get('base_url', '')}")
+        out.append(f"  auth: type={a.get('type', 'none')} name={a.get('name', '') or '-'} "
+                   f"credential_key={a.get('credential', '') or '-'}")
+        if t.get("default_headers"):
+            out.append(f"  default_headers: {json.dumps(t['default_headers'])}")
+        ops = t.get("operations", [])
+        if ops:
+            out.append(f"  operations ({len(ops)}):")
+            for o in ops[:40]:
+                out.append(f"    - {o['op_id']}: {o['method']} {o['path']}")
+    else:
+        out.append(f"  command: {t.get('command', '')} {' '.join(t.get('args', []))}")
+        if t.get("env"):
+            out.append("  env: " + ", ".join(f"{k}={_gw_mask_val(v)}" for k, v in t["env"].items()))
+        caps = t.get("capabilities", [])
+        synced = f" (synced {t.get('capabilities_synced')})" if caps else ""
+        out.append(f"  capabilities ({len(caps)}){synced}:")
+        for c in caps[:40]:
+            out.append(f"    - {c['name']}: {c.get('description', '')[:80]}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def gateway_discover(name: str = "", by_role: str = "") -> str:
+    """Connect to registered MCP server target(s), list their tools, and cache the
+    capabilities so agents can browse them without re-spawning. REST targets are
+    skipped (their operations come from registration / generated specs).
+
+    Args:
+        name: A single MCP target to discover. Empty = all MCP targets.
+        by_role: Your role (for the audit log).
+    """
+    if not _HAS_MCP_CLIENT:
+        return "MCP client SDK not available in this Python env (pip install mcp). REST targets still work."
+    gw = _gw_load()
+    targets = gw.get("targets", {})
+    if name and (name not in targets or targets[name].get("kind") != "mcp"):
+        return f"'{name}' is not a registered MCP target."
+    todo = [name] if name else [n for n, t in targets.items() if t.get("kind") == "mcp"]
+    if not todo:
+        return "No MCP targets registered. Use gateway_register_mcp first."
+    results = []
+    for n in todo:
+        t = targets.get(n)
+        if not t or t.get("kind") != "mcp":
+            continue
+        env = _gw_resolve_env(t.get("env", {}))
+        t0 = time.time()
+        try:
+            res = _gw_run(_gw_mcp_do(t["command"], t.get("args", []), env, lambda s: s.list_tools()))
+            caps = _gw_ser_tools(res)
+            ms = (time.time() - t0) * 1000
+
+            def _upd(g, n=n, caps=caps, ms=ms):
+                if n in g["targets"]:
+                    g["targets"][n]["capabilities"] = caps
+                    g["targets"][n]["capabilities_synced"] = _now()
+                _gw_audit(g, by_role, n, "discover", f"{len(caps)} tools", ms=ms)
+
+            _gw_mutate(_upd)
+            preview = ", ".join(c["name"] for c in caps[:12]) + ("..." if len(caps) > 12 else "")
+            results.append(f"{n}: {len(caps)} tools -- {preview}")
+        except Exception as e:
+            _gw_mutate(lambda g, n=n: _gw_audit(g, by_role, n, "discover", "error", ok=False))
+            results.append(f"{n}: discovery failed -- {e}")
+    return "\n".join(results)
+
+
+@mcp.tool()
+def gateway_capabilities(query: str = "") -> str:
+    """Tool discovery -- ask the hub "what can I do?". Lists every capability across all
+    enabled targets: MCP server tools (cached via gateway_discover) and REST
+    operations (from generated specs). Optionally filter by a keyword.
+
+    Args:
+        query: Optional keyword to filter capabilities by name/description/path.
+    """
+    gw = _gw_load()
+    q = (query or "").lower()
+    blocks, total = [], 0
+    for n, t in sorted(gw.get("targets", {}).items()):
+        if not t.get("enabled", True):
+            continue
+        lines = []
+        if t.get("kind") == "mcp":
+            for c in t.get("capabilities", []):
+                if q and q not in (c.get("name", "") + " " + c.get("description", "")).lower():
+                    continue
+                lines.append(f"    - {c['name']}  -  {c.get('description', '')[:70]}")
+        else:
+            for o in t.get("operations", []):
+                if q and q not in (o.get("op_id", "") + " " + o.get("path", "") + " " + o.get("summary", "")).lower():
+                    continue
+                lines.append(f"    - {o['op_id']}  -  {o['method']} {o['path']}")
+        if lines:
+            hint = "gateway_call_tool" if t.get("kind") == "mcp" else "gateway_call_rest"
+            blocks.append(f"  {n} [{t.get('kind')}] -> use {hint}:")
+            blocks.extend(lines)
+            total += len(lines)
+    if not blocks:
+        if any(t.get("kind") == "mcp" and not t.get("capabilities") for t in gw.get("targets", {}).values()):
+            return "No capabilities cached yet -- run gateway_discover to fetch MCP tool lists."
+        return "No capabilities found" + (f" matching '{query}'." if query else ". Register targets first.")
+    head = f"=== HUB CAPABILITIES ({total}{' matching ' + repr(query) if query else ''}) ==="
+    return head + "\n" + "\n".join(blocks)
+
+
+# ============================================================================
+# Unified auth -- credential vault (agents never see raw secrets)
+# ============================================================================
+
+@mcp.tool()
+def gateway_set_credential(key: str, value: str, by_role: str = "") -> str:
+    """Store a secret in the hub vault (a separate, chmod-600 file). Targets reference
+    it by KEY; the raw value is never returned by any tool or shown on the dashboard.
+
+    Args:
+        key: Vault key, e.g. "stripe_key".
+        value: The secret value.
+        by_role: Your role.
+    """
+    if not key or not value:
+        return "key and value are required."
+    _vault_mutate(lambda v: v.__setitem__(key, value))
+    _gw_mutate(lambda g: _gw_audit(g, by_role, "vault", "set_credential", key))
+    return (f"Stored credential '{key}' ({_gw_mask(value)}). Reference it from a target's "
+            f"credential_key, or as a 'vault:{key}' env value on an MCP target.")
+
+
+@mcp.tool()
+def gateway_list_credentials() -> str:
+    """List vault credential KEYS only (never the values)."""
+    keys = list(_vault_load().keys())
+    if not keys:
+        return "Vault is empty. Add one with gateway_set_credential."
+    return "Vault keys (values hidden):\n" + "\n".join(f"  - {k}" for k in sorted(keys))
+
+
+@mcp.tool()
+def gateway_delete_credential(key: str, by_role: str = "") -> str:
+    """Delete a credential from the vault."""
+    existed = _vault_mutate(lambda v: v.pop(key, None) is not None)
+    if existed:
+        _gw_mutate(lambda g: _gw_audit(g, by_role, "vault", "delete_credential", key))
+        return f"Deleted credential '{key}'."
+    return f"No credential '{key}'."
+
+
+# ============================================================================
+# Routing rules
+# ============================================================================
+
+@mcp.tool()
+def gateway_add_route(pattern: str, target: str, priority: int = 0, by_role: str = "") -> str:
+    """Add a routing rule: if a request contains `pattern` (case-insensitive), send it
+    to `target`. Higher priority wins. Used by gateway_route to pick a target.
+
+    Args:
+        pattern: Substring/keyword to match in a request.
+        target: Target name to route to (must be registered).
+        priority: Higher = checked first (default 0).
+        by_role: Your role.
+    """
+    def op(gw):
+        if target not in gw["targets"]:
+            return False
+        gw["routes"] = [r for r in gw.get("routes", [])
+                        if not (r.get("pattern") == pattern and r.get("target") == target)]
+        gw["routes"].append({"pattern": pattern, "target": target,
+                             "priority": int(priority), "added_by": by_role or "gateway"})
+        _gw_audit(gw, by_role, target, "add_route", pattern)
+        return True
+    return (f"Route added: '{pattern}' -> {target} (priority {priority})."
+            if _gw_mutate(op) else f"Target '{target}' is not registered.")
+
+
+@mcp.tool()
+def gateway_remove_route(pattern: str, target: str = "", by_role: str = "") -> str:
+    """Remove routing rule(s) matching pattern (and target if given)."""
+    def op(gw):
+        before = len(gw.get("routes", []))
+        gw["routes"] = [r for r in gw.get("routes", [])
+                        if not (r.get("pattern") == pattern and (not target or r.get("target") == target))]
+        removed = before - len(gw["routes"])
+        if removed:
+            _gw_audit(gw, by_role, target or "*", "remove_route", pattern)
+        return removed
+    n = _gw_mutate(op)
+    return f"Removed {n} route(s)." if n else "No matching route."
+
+
+@mcp.tool()
+def gateway_list_routes() -> str:
+    """List routing rules, highest priority first."""
+    gw = _gw_load()
+    routes = sorted(gw.get("routes", []), key=lambda r: -r.get("priority", 0))
+    if not routes:
+        return "No routes. Add one with gateway_add_route, or rely on tag matching in gateway_route."
+    out = ["=== ROUTES ==="]
+    for r in routes:
+        out.append(f"  [{r.get('priority', 0)}] '{r.get('pattern')}' -> {r.get('target')}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def gateway_route(request: str) -> str:
+    """Decide which target should handle a request. Checks explicit routes (by
+    priority), then falls back to matching target tags found in the request text.
+
+    Args:
+        request: A natural-language or keyword request, e.g. "charge a credit card".
+    """
+    gw = _gw_load()
+    req = (request or "").lower()
+    for r in sorted(gw.get("routes", []), key=lambda r: -r.get("priority", 0)):
+        pat = (r.get("pattern") or "").lower()
+        if pat and pat in req and r.get("target") in gw.get("targets", {}):
+            return f"-> {r['target']}  (route: '{r['pattern']}')"
+    hits = []
+    for n, t in gw.get("targets", {}).items():
+        if not t.get("enabled", True):
+            continue
+        if any(tag.lower() in req for tag in t.get("tags", [])):
+            hits.append(n)
+    if hits:
+        return "-> " + ", ".join(hits) + "  (tag match)"
+    return "No route matched. Targets: " + (", ".join(gw.get("targets", {})) or "none")
+
+
+# ============================================================================
+# Rate limiting, audit & usage
+# ============================================================================
+
+@mcp.tool()
+def gateway_set_limit(target: str = "", per_minute: int = 60, by_role: str = "") -> str:
+    """Set a per-minute call rate limit (per agent). Empty target sets the global
+    default. per_minute <= 0 means unlimited.
+
+    Args:
+        target: Target name, or empty for the global default.
+        per_minute: Max calls per minute per agent.
+        by_role: Your role.
+    """
+    def op(gw):
+        gw.setdefault("limits", {"default": {}, "targets": {}})
+        if target:
+            gw["limits"].setdefault("targets", {})[target] = {"per_minute": int(per_minute)}
+        else:
+            gw["limits"]["default"] = {"per_minute": int(per_minute)}
+        _gw_audit(gw, by_role, target or "default", "set_limit", str(per_minute))
+    _gw_mutate(op)
+    scope = f"target '{target}'" if target else "default (all targets)"
+    return f"Rate limit for {scope} set to {per_minute}/min" + (" (unlimited)" if per_minute <= 0 else "") + "."
+
+
+@mcp.tool()
+def gateway_audit(last_n: int = 30, agent: str = "", target: str = "") -> str:
+    """Show the central audit trail: who called what, when, status, latency.
+
+    Args:
+        last_n: How many recent entries to show.
+        agent: Filter by agent/role.
+        target: Filter by target.
+    """
+    gw = _gw_load()
+    rows = gw.get("audit", [])
+    if agent:
+        rows = [r for r in rows if r.get("agent") == agent]
+    if target:
+        rows = [r for r in rows if r.get("target") == target]
+    rows = rows[-last_n:]
+    if not rows:
+        return "No audit entries match."
+    out = [f"=== GATEWAY AUDIT (last {len(rows)}) ==="]
+    for r in rows:
+        mark = "" if r.get("ok", True) else " x"
+        ms = f" {r['ms']}ms" if r.get("ms") else ""
+        out.append(f"  {r.get('time')}  {r.get('agent')} -> {r.get('target')} "
+                   f"{r.get('op')} [{r.get('status')}]{ms}{mark}")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def gateway_usage() -> str:
+    """Show per-target usage stats (calls, errors, last used) and configured limits."""
+    gw = _gw_load()
+    stats = gw.get("stats", {})
+    out = ["=== GATEWAY USAGE ===", f"  default limit: {_effective_limit(gw, '__none__')}/min"]
+    if not stats:
+        out.append("  No calls yet.")
+    for n, s in sorted(stats.items()):
+        out.append(f"  - {n}: {s.get('calls', 0)} calls, {s.get('errors', 0)} errors, "
+                   f"limit {_effective_limit(gw, n)}/min, last {s.get('last', '-')}")
+    return "\n".join(out)
+
+
+# ============================================================================
+# Proxy / invocation
+# ============================================================================
+
+@mcp.tool()
+def gateway_call_rest(target: str, path: str = "", method: str = "GET",
+                      query: str = "", body: str = "", agent: str = "",
+                      extra_headers: str = "") -> str:
+    """Proxy a REST call through the hub to a registered REST target. The hub injects
+    the stored credential, enforces the rate limit, and logs the call. Agents never
+    handle the secret.
+
+    Args:
+        target: A registered REST target name.
+        path: Path appended to the target's base_url, e.g. "/charges".
+        method: GET | POST | PUT | PATCH | DELETE.
+        query: Query string ("a=1&b=2") or JSON object.
+        body: Request body (sent as JSON if non-empty).
+        agent: Your role (for rate-limiting + audit).
+        extra_headers: JSON object of extra headers.
+    """
+    gw = _gw_load()
+    t = gw.get("targets", {}).get(target)
+    if not t:
+        return f"Unknown target '{target}'. See gateway_list_targets."
+    if t.get("kind") != "rest":
+        return f"'{target}' is an MCP target -- use gateway_call_tool instead."
+    if not t.get("enabled", True):
+        return f"Target '{target}' is disabled."
+    lim = _effective_limit(gw, target)
+    ok, retry = _gw_rate(agent, target, lim)
+    if not ok:
+        _gw_mutate(lambda g: _gw_audit(g, agent, target, f"{method.upper()} {path}", "rate-limited", ok=False))
+        return f"Rate limit {lim}/min hit for {target}. Retry in ~{retry}s."
+    url = t.get("base_url", "").rstrip("/")
+    if path:
+        url += "/" + path.lstrip("/")
+    headers = dict(t.get("default_headers", {}))
+    headers.update(_gw_obj(extra_headers))
+    q = _gw_qs(query)
+    auth = t.get("auth", {})
+    cred = _vault_load().get(auth.get("credential", ""), "") if auth.get("credential") else ""
+    atype, aname = auth.get("type", "none"), auth.get("name", "")
+    if atype == "header" and aname:
+        headers[aname] = cred
+    elif atype == "bearer":
+        headers["Authorization"] = "Bearer " + cred
+    elif atype == "basic":
+        headers["Authorization"] = "Basic " + _b64.b64encode(cred.encode("utf-8")).decode("ascii")
+    elif atype == "query" and aname:
+        q[aname] = cred
+    if q:
+        url += ("&" if "?" in url else "?") + _urlparse.urlencode(q)
+    data = body.encode("utf-8") if body else None
+    if data:
+        headers.setdefault("Content-Type", "application/json")
+    req = _urlreq.Request(url, data=data, headers=headers, method=method.upper())
+    t0 = time.time()
+    try:
+        with _urlreq.urlopen(req, timeout=GATEWAY_CALL_TIMEOUT) as resp:
+            code, text = resp.getcode(), resp.read().decode("utf-8", "replace")
+    except _urlerr.HTTPError as e:
+        code = e.code
+        try:
+            text = e.read().decode("utf-8", "replace")
+        except Exception:
+            text = ""
+    except Exception as e:
+        ms = (time.time() - t0) * 1000
+        _gw_mutate(lambda g: _gw_audit(g, agent, target, f"{method.upper()} {path}", "error", ms=ms, ok=False))
+        return f"Request to {target} failed: {e}"
+    ms = (time.time() - t0) * 1000
+    ok2 = 200 <= code < 400
+    _gw_mutate(lambda g: _gw_audit(g, agent, target, f"{method.upper()} {path}", str(code), ms=ms, ok=ok2))
+    snippet = text if len(text) <= 4000 else text[:4000] + f"\n... [{len(text)} bytes total, truncated]"
+    return f"HTTP {code} - {int(ms)}ms - {target} {method.upper()} {path or '/'}\n{snippet}"
+
+
+@mcp.tool()
+def gateway_call_tool(target: str, tool: str, arguments: str = "", agent: str = "") -> str:
+    """Proxy a tool call to a registered MCP server through the hub. The hub spawns the
+    server with its stored credentials injected, forwards the call, logs it to the
+    audit trail, and returns the result. Agents never see the credentials.
+
+    Args:
+        target: A registered MCP target name.
+        tool: The tool to invoke on that server.
+        arguments: JSON object of arguments, e.g. '{"city":"London"}'.
+        agent: Your role (for rate-limiting + audit).
+    """
+    if not _HAS_MCP_CLIENT:
+        return "MCP client SDK not available in this Python env (pip install mcp)."
+    gw = _gw_load()
+    t = gw.get("targets", {}).get(target)
+    if not t:
+        return f"Unknown target '{target}'. See gateway_list_targets."
+    if t.get("kind") != "mcp":
+        return f"'{target}' is a {t.get('kind')} target -- use gateway_call_rest instead."
+    if not t.get("enabled", True):
+        return f"Target '{target}' is disabled."
+    lim = _effective_limit(gw, target)
+    ok, retry = _gw_rate(agent, target, lim)
+    if not ok:
+        _gw_mutate(lambda g: _gw_audit(g, agent, target, f"call:{tool}", "rate-limited", ok=False))
+        return f"Rate limit {lim}/min hit for {target}. Retry in ~{retry}s."
+    env = _gw_resolve_env(t.get("env", {}))
+    args_obj = _gw_obj(arguments)
+    t0 = time.time()
+    try:
+        res = _gw_run(_gw_mcp_do(t["command"], t.get("args", []), env, lambda s: s.call_tool(tool, args_obj)))
+        text = _gw_ser_content(res)
+        ms = (time.time() - t0) * 1000
+        _gw_mutate(lambda g: _gw_audit(g, agent, target, f"call:{tool}", "ok", ms=ms))
+        return f"[{target}.{tool} {int(ms)}ms]\n{text}"
+    except Exception as e:
+        ms = (time.time() - t0) * 1000
+        _gw_mutate(lambda g: _gw_audit(g, agent, target, f"call:{tool}", "error", ms=ms, ok=False))
+        return f"Call to {target}.{tool} failed: {e}"
+
+
+# ============================================================================
+# KILLER FEATURE -- Auto-Adapter Generator (OpenAPI/Swagger -> MCP server)
+# ============================================================================
+
+def _gw_py_ident(s: str) -> str:
+    s = _re.sub(r"[^0-9a-zA-Z_]", "_", str(s or "")).strip("_")
+    if not s:
+        s = "op"
+    if s[0].isdigit():
+        s = "n_" + s
+    if _keyword.iskeyword(s):
+        s = s + "_"
+    return s
+
+
+def _gw_synth_id(method: str, path: str) -> str:
+    return _gw_py_ident(method + "_" + path)
+
+
+def _gw_load_spec(spec: str):
+    s = (spec or "").strip()
+    if not s:
+        raise ValueError("empty spec")
+    if s[0] in "{[":
+        return json.loads(s)
+    if s.startswith(("http://", "https://")):
+        with _urlreq.urlopen(s, timeout=20) as r:
+            s = r.read().decode("utf-8", "replace")
+    elif Path(s).exists():
+        s = Path(s).read_text(encoding="utf-8")
+    else:
+        raise ValueError("spec must be inline JSON, an existing file path, or a URL")
+    try:
+        return json.loads(s)
+    except Exception:
+        try:
+            import yaml  # optional
+            return yaml.safe_load(s)
+        except ImportError:
+            raise ValueError("spec looks like YAML -- install PyYAML or provide JSON")
+
+
+def _gw_spec_base_url(spec: dict) -> str:
+    servers = spec.get("servers")
+    if isinstance(servers, list) and servers and isinstance(servers[0], dict) and servers[0].get("url"):
+        return servers[0]["url"]
+    host = spec.get("host")  # Swagger v2
+    if host:
+        scheme = (spec.get("schemes") or ["https"])[0]
+        return f"{scheme}://{host}{spec.get('basePath', '')}"
+    return ""
+
+
+def _gw_detect_auth(spec: dict):
+    schemes = (spec.get("components", {}) or {}).get("securitySchemes") or spec.get("securityDefinitions") or {}
+    for s in schemes.values():
+        if not isinstance(s, dict):
+            continue
+        typ = (s.get("type") or "").lower()
+        if typ == "apikey":
+            loc = (s.get("in") or "header").lower()
+            return ("query" if loc == "query" else "header"), s.get("name", "X-API-Key")
+        if typ == "http" and (s.get("scheme", "").lower() == "bearer"):
+            return "bearer", "Authorization"
+        if typ == "oauth2":
+            return "bearer", "Authorization"
+    return "none", ""
+
+
+def _gw_extract_ops(spec: dict):
+    ops = []
+    paths = spec.get("paths", {})
+    if not isinstance(paths, dict):
+        return ops
+    for path, item in paths.items():
+        if not isinstance(item, dict):
+            continue
+        shared = item.get("parameters") if isinstance(item.get("parameters"), list) else []
+        for method in ("get", "post", "put", "patch", "delete"):
+            op = item.get(method)
+            if not isinstance(op, dict):
+                continue
+            params = list(shared)
+            if isinstance(op.get("parameters"), list):
+                params += op["parameters"]
+            params = [p for p in params if isinstance(p, dict) and p.get("name")]
+            ops.append({
+                "method": method, "path": path,
+                "op_id": op.get("operationId") or _gw_synth_id(method, path),
+                "summary": op.get("summary") or op.get("description") or "",
+                "params": params,
+                "has_body": bool(op.get("requestBody")) or method in ("post", "put", "patch"),
+            })
+    return ops
+
+
+def _gw_gen_tool(op: dict, used: set) -> str:
+    name = _gw_py_ident(op["op_id"])
+    base, i = name, 2
+    while name in used:
+        name, i = f"{base}_{i}", i + 1
+    used.add(name)
+    seen = {"body"} if op["has_body"] else set()
+    pmap = []  # (location, original_name, python_name)
+    for p in op["params"]:
+        loc = p.get("in")
+        if loc not in ("path", "query", "header"):
+            continue
+        py = _gw_py_ident(p["name"])
+        b, j = py, 2
+        while py in seen:
+            py, j = f"{b}_{j}", j + 1
+        seen.add(py)
+        pmap.append((loc, p["name"], py))
+    sig = [f'{py}: str = ""' for _, _, py in pmap]
+    if op["has_body"]:
+        sig.append('body: str = ""')
+    doc = " ".join((op["summary"] or "").split())[:280].replace('"""', "'''").rstrip("\\")
+    L = ["@mcp.tool()", f"def {name}({', '.join(sig)}) -> str:", f'    """{doc}', "",
+         f'    {op["method"].upper()} {op["path"]}', '    """', f'    _p = {op["path"]!r}']
+    for loc, orig, py in pmap:
+        if loc == "path":
+            L.append(f'    _p = _p.replace("{{{orig}}}", _url.quote(str({py})))')
+    L.append("    _q = {}")
+    for loc, orig, py in pmap:
+        if loc == "query":
+            L.append(f'    if {py} != "": _q[{orig!r}] = {py}')
+    L.append("    _h = {}")
+    for loc, orig, py in pmap:
+        if loc == "header":
+            L.append(f'    if {py} != "": _h[{orig!r}] = {py}')
+    body_expr = "body" if op["has_body"] else '""'
+    L.append(f'    return _request({op["method"].upper()!r}, _p, _q, {body_expr}, _h)')
+    L.append("")
+    return "\n".join(L)
+
+
+def _gw_gen_adapter_code(name: str, base_url: str, ops: list, auth_type: str, auth_name: str) -> str:
+    prefix = _re.sub(r"[^A-Z0-9]", "_", name.upper())
+    used = set()
+    tools_src = "\n".join(_gw_gen_tool(o, used) for o in ops)
+    tmpl = '''#!/usr/bin/env python3
+"""
+__NAME__ MCP adapter -- auto-generated by Claude Team MCP Gateway from an OpenAPI spec.
+Exposes __COUNT__ operations as MCP tools. Editable; re-generating overwrites this file.
+
+Run standalone:
+    env __PREFIX___API_KEY=... python __FILE__
+Register with Claude Code:
+    claude mcp add __NAME__ -s user -- env __PREFIX___API_KEY=... python /abs/path/__FILE__
+"""
+import os
+import urllib.request as _req
+import urllib.error as _err
+import urllib.parse as _url
+
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("__NAME__")
+
+BASE_URL = os.environ.get("__PREFIX___BASE_URL", "__BASE_URL__").rstrip("/")
+API_KEY = os.environ.get("__PREFIX___API_KEY", "")
+AUTH_TYPE = "__AUTH_TYPE__"
+AUTH_NAME = "__AUTH_NAME__"
+
+
+def _request(method, path, query=None, body="", headers=None):
+    url = BASE_URL + ("/" + path.lstrip("/") if path else "")
+    h = dict(headers or {})
+    q = dict(query or {})
+    if API_KEY:
+        if AUTH_TYPE == "header" and AUTH_NAME:
+            h[AUTH_NAME] = API_KEY
+        elif AUTH_TYPE == "bearer":
+            h["Authorization"] = "Bearer " + API_KEY
+        elif AUTH_TYPE == "query" and AUTH_NAME:
+            q[AUTH_NAME] = API_KEY
+    if q:
+        url += ("&" if "?" in url else "?") + _url.urlencode(q)
+    data = body.encode("utf-8") if body else None
+    if data:
+        h.setdefault("Content-Type", "application/json")
+    req = _req.Request(url, data=data, headers=h, method=method)
+    try:
+        with _req.urlopen(req, timeout=30) as resp:
+            return "HTTP %s\\n%s" % (resp.getcode(), resp.read().decode("utf-8", "replace"))
+    except _err.HTTPError as e:
+        return "HTTP %s\\n%s" % (e.code, e.read().decode("utf-8", "replace"))
+    except Exception as e:
+        return "Request failed: %s" % e
+
+
+__TOOLS__
+
+if __name__ == "__main__":
+    mcp.run()
+'''
+    return (tmpl.replace("__NAME__", name).replace("__COUNT__", str(len(ops)))
+                .replace("__PREFIX__", prefix).replace("__BASE_URL__", base_url or "")
+                .replace("__AUTH_TYPE__", auth_type or "none").replace("__AUTH_NAME__", auth_name or "")
+                .replace("__FILE__", name + ".py").replace("__TOOLS__", tools_src))
+
+
+@mcp.tool()
+def gateway_generate_adapter(spec: str, name: str = "", out_path: str = "",
+                             base_url: str = "", credential_key: str = "",
+                             register: bool = True, by_role: str = "") -> str:
+    """KILLER FEATURE -- turn an OpenAPI/Swagger spec into a ready-to-run MCP server.
+    Parses every path+method into an MCP tool and writes a standalone Python MCP
+    server file. Optionally auto-registers it as a hub REST target so it is callable
+    and discoverable immediately. Removes ~90% of the boilerplate of wrapping an API.
+
+    Args:
+        spec: Inline JSON, a file path, or a URL to an OpenAPI/Swagger document.
+        name: Adapter/target name (default: derived from the spec title).
+        out_path: Where to write the .py file (default: <ADAPTER_DIR>/<name>.py).
+        base_url: Override the base URL (else taken from the spec's servers/host).
+        credential_key: Vault key for the API key when auto-registering the REST target.
+        register: If True, also register the generated API as a hub REST target.
+        by_role: Your role.
+    """
+    try:
+        doc = _gw_load_spec(spec)
+    except Exception as e:
+        return f"Could not load spec: {e}"
+    if not isinstance(doc, dict) or "paths" not in doc:
+        return "Spec has no 'paths' -- is this a valid OpenAPI/Swagger document?"
+    info = doc.get("info", {}) if isinstance(doc.get("info"), dict) else {}
+    adapter_name = _gw_py_ident(name or info.get("title") or "api").lower()
+    burl = base_url or _gw_spec_base_url(doc)
+    auth_type, auth_name = _gw_detect_auth(doc)
+    ops = _gw_extract_ops(doc)
+    if not ops:
+        return "No operations found in spec."
+    truncated = ""
+    if len(ops) > GATEWAY_MAX_OPS:
+        truncated = f" (capped at {GATEWAY_MAX_OPS} of {len(ops)} ops; raise GATEWAY_MAX_OPS)"
+        ops = ops[:GATEWAY_MAX_OPS]
+    code = _gw_gen_adapter_code(adapter_name, burl, ops, auth_type, auth_name)
+    out = Path(out_path) if out_path else (ADAPTER_DIR / f"{adapter_name}.py")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(out, code)
+    summary = [f"Generated MCP adapter '{adapter_name}' with {len(ops)} tools -> {out}{truncated}",
+               f"Base URL: {burl or '(none -- pass base_url=)'}",
+               f"Auth: {auth_type}" + (f" ({auth_name})" if auth_name else "")]
+    if register and burl:
+        ops_brief = [{"op_id": _gw_py_ident(o["op_id"]), "method": o["method"].upper(),
+                      "path": o["path"], "summary": " ".join((o["summary"] or "").split())[:120]} for o in ops]
+
+        def _reg(gw):
+            gw["targets"][adapter_name] = {
+                "kind": "rest", "description": info.get("title") or adapter_name,
+                "tags": ["generated"], "base_url": burl,
+                "auth": {"type": auth_type, "name": auth_name, "credential": credential_key},
+                "default_headers": {}, "operations": ops_brief, "enabled": True,
+                "registered_by": by_role or "gateway", "registered_at": _now(),
+            }
+            _gw_audit(gw, by_role, adapter_name, "generate_adapter", f"{len(ops)} ops")
+
+        _gw_mutate(_reg)
+        ck = credential_key or f"{adapter_name}_key"
+        summary.append(f"Registered REST target '{adapter_name}'. Set its key with "
+                       f"gateway_set_credential('{ck}', '<secret>'), then call via gateway_call_rest "
+                       f"or browse with gateway_capabilities.")
+    elif register and not burl:
+        summary.append("Not registered (no base URL). Re-run with base_url=... to register a callable target.")
+    prefix = _re.sub(r"[^A-Z0-9]", "_", adapter_name.upper())
+    summary.append(f"Run standalone: env {prefix}_API_KEY=... python {out}")
+    return "\n".join(summary)
+
+
+# ============================================================================
+# Gateway dashboard view (served by the existing dashboard server at /gateway)
+# ============================================================================
+
+def _gw_dashboard_payload() -> dict:
+    gw = _gw_load()
+    targets = {}
+    for n, t in gw.get("targets", {}).items():
+        targets[n] = {
+            "kind": t.get("kind"), "description": t.get("description", ""),
+            "tags": t.get("tags", []), "enabled": t.get("enabled", True),
+            "base_url": t.get("base_url", ""),
+            "command": (t.get("command", "") + " " + " ".join(t.get("args", []))).strip(),
+            "capabilities": len(t.get("capabilities", [])),
+            "operations": len(t.get("operations", [])),
+        }
+    return {
+        "targets": targets,
+        "routes": gw.get("routes", []),
+        "audit": gw.get("audit", [])[-80:],
+        "stats": gw.get("stats", {}),
+        "default_limit": _effective_limit(gw, "__none__"),
+        "credentials": list(_vault_load().keys()),
+    }
+
+
+def _gateway_html() -> str:
+    return """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>MCP Hub / Gateway</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#e6edf3;--dim:#8b949e;--accent:#58a6ff;--green:#3fb950;--amber:#d29922;--red:#f85149;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,Segoe UI,Roboto,sans-serif;padding:16px;font-size:14px}
+h1{font-size:18px;margin-bottom:4px}
+a{color:var(--accent);text-decoration:none}
+.sub{color:var(--dim);font-size:12px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px}
+.card h2{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);margin-bottom:10px}
+.row{padding:6px 0;border-bottom:1px solid var(--border);font-size:13px}
+.row:last-child{border:none}
+.pill{font-size:10px;padding:1px 6px;border-radius:10px;background:#21262d;color:var(--dim);margin-left:4px}
+.rest{color:var(--green)}.mcp{color:var(--accent)}
+.scroll{max-height:360px;overflow-y:auto}
+.full{grid-column:1/-1}.ok{color:var(--green)}.err{color:var(--red)}
+code{color:var(--amber)}
+</style></head><body>
+<h1>🛰️ MCP Hub / Gateway <a href="/" style="font-size:13px">&larr; Team Dashboard</a></h1>
+<div class="sub" id="updated">connecting...</div>
+<div class="grid">
+  <div class="card full"><h2>Targets</h2><div id="targets"></div></div>
+  <div class="card"><h2>Routes</h2><div id="routes"></div></div>
+  <div class="card"><h2>Usage</h2><div id="usage"></div></div>
+  <div class="card"><h2>Vault keys</h2><div id="creds"></div></div>
+  <div class="card full"><h2>Audit trail</h2><div class="scroll" id="audit"></div></div>
+</div>
+<script>
+const E=id=>document.getElementById(id);
+function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+async function tick(){
+ try{
+  const r=await fetch('/api/gateway'); const d=await r.json();
+  E('targets').innerHTML=Object.entries(d.targets).map(([n,t])=>`<div class="row"><span class="${t.kind}">●</span> <b>${esc(n)}</b> <span class="pill">${t.kind}</span> ${t.enabled?'':'<span class="pill">disabled</span>'} <span class="pill">${t.capabilities||t.operations||0} ops</span><br><span class="sub">${esc(t.base_url||t.command||'')} ${(t.tags||[]).map(x=>'#'+esc(x)).join(' ')}</span></div>`).join('')||'<div class="row">none -- register a target</div>';
+  E('routes').innerHTML=(d.routes||[]).slice().sort((a,b)=>(b.priority||0)-(a.priority||0)).map(r=>`<div class="row"><code>${esc(r.pattern)}</code> → ${esc(r.target)} <span class="pill">p${r.priority||0}</span></div>`).join('')||'<div class="row">none</div>';
+  E('usage').innerHTML=`<div class="row sub">default ${d.default_limit}/min</div>`+Object.entries(d.stats||{}).map(([n,s])=>`<div class="row">${esc(n)}: ${s.calls||0} calls, <span class="${s.errors?'err':'ok'}">${s.errors||0} err</span></div>`).join('');
+  E('creds').innerHTML=(d.credentials||[]).map(k=>`<div class="row">🔑 ${esc(k)} <span class="sub">(hidden)</span></div>`).join('')||'<div class="row">empty</div>';
+  E('audit').innerHTML=(d.audit||[]).slice(-80).map(a=>`<div class="row"><span class="sub">${esc((a.time||'').split(' ')[1]||a.time)}</span> ${esc(a.agent)} → ${esc(a.target)} ${esc(a.op)} <span class="${a.ok===false?'err':'ok'}">[${esc(a.status)}]</span> ${a.ms?a.ms+'ms':''}</div>`).reverse().join('')||'<div class="row">no activity</div>';
+  E('updated').textContent='live - '+new Date().toLocaleTimeString();
+ }catch(e){E('updated').textContent='disconnected -- retrying...';}
+}
+tick();setInterval(tick,2000);
+</script></body></html>"""
 
 
 if __name__ == "__main__":
