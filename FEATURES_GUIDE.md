@@ -1,4 +1,4 @@
-# Team Coordinator MCP — Complete Feature Guide (65 tools)
+# Team Coordinator MCP — Complete Feature Guide (94 tools)
 
 සියලුම features කොහොමද වැඩ කරන්නේ කියලා, batch අනුව.
 
@@ -70,6 +70,48 @@ suggest_worktrees — per-agent git worktree commands generate
 webhook_notify   — Slack/Discord/Teams notification
 
 ═══════════════════════════════════════════════════════════
+BATCH F — MCP HUB / GATEWAY (21 tools)
+═══════════════════════════════════════════════════════════
+තනි MCP server එකක් router/proxy එකක් විදිහට. අනිත් MCP servers + REST APIs
+මේකට "targets" විදිහට register වෙනවා; agent එක එක පාරක් hub එකට connect වෙලා
+ඔක්කොටම access ගන්නවා. Keys agent ට පේන්නේ නෑ.
+
+REGISTRY & DISCOVERY
+gateway_register_rest  — REST API එකක් target එකක් විදිහට register
+gateway_register_mcp   — තවත් MCP server එකක් target එකක් විදිහට register
+gateway_unregister     — target එකක් අයින් කරනවා
+gateway_toggle         — target එකක් enable/disable (config නැති වෙන්නේ නෑ)
+gateway_list_targets   — register වෙලා තියෙන targets බලනවා
+gateway_describe       — එක target එකක full config (credential masked)
+gateway_discover       — MCP target එකක tools list එක ගෙනත් cache කරනවා
+gateway_capabilities   — "මට මොනවද කරන්න පුළුවන්?" — හැම capability එකක්ම
+
+UNIFIED AUTH (vault — chmod 600, agent ට key පේන්නේ නෑ)
+gateway_set_credential   — secret එකක් vault එකේ store (key එකකින්)
+gateway_list_credentials — vault KEYS විතරයි (values කවදාවත් නෑ)
+gateway_delete_credential— credential එකක් delete
+
+ROUTING
+gateway_add_route    — "මේ pattern එක -> මේ target එක" rule එකක්
+gateway_remove_route — route එකක් අයින්
+gateway_list_routes  — routes priority order එකේ
+gateway_route        — request එකකට හරි target එක තෝරනවා (route + tag match)
+
+LIMITS & AUDIT
+gateway_set_limit — per-agent/target rate limit (per minute; 0 = unlimited)
+gateway_audit     — මධ්‍යගත audit trail (කවුද මොකද කවදද status latency)
+gateway_usage     — target අනුව calls/errors/limits
+
+PROXY & GENERATOR
+gateway_call_rest      — REST call එකක් hub හරහා (key inject + rate-limit + log)
+gateway_call_tool      — MCP tool call එකක් downstream server එකකට proxy
+gateway_generate_adapter — KILLER: OpenAPI/Swagger spec -> සම්පූර්ණ MCP server
+                           file එකක් auto-generate + target විදිහට register
+
+Dashboard: /gateway view එක (team dashboard එකෙන් link). targets, routes,
+usage, vault keys, audit live පෙන්වනවා.
+
+═══════════════════════════════════════════════════════════
 NEW ENV VARS (optional)
 ═══════════════════════════════════════════════════════════
 TEAM_BACKUP_DIR   — backups location (default: <state>/team_backups)
@@ -80,6 +122,13 @@ DASHBOARD_PORT=8765 — dashboard port
 DASHBOARD_HOST=127.0.0.1 — set 0.0.0.0 for LAN access
 OBSIDIAN_VAULT    — vault path for obsidian_sync
 WEBHOOK_URL       — default webhook for webhook_notify
+GATEWAY_FILE      — hub registry/routes/audit (default: <state>/gateway.json)
+GATEWAY_VAULT_FILE— secret vault (chmod 600; default: <state>/gateway_vault.json)
+ADAPTER_DIR       — generated adapters location (default: <state>/adapters)
+GATEWAY_RATE_PER_MIN=60 — default per-agent/target call limit
+GATEWAY_AUDIT_LIMIT=2000 — audit trail cap
+GATEWAY_CALL_TIMEOUT=30 — proxied REST call timeout (s)
+GATEWAY_MAX_OPS=150 — max ops generated from one OpenAPI spec
 
 ═══════════════════════════════════════════════════════════
 TYPICAL ADVANCED WORKFLOW
