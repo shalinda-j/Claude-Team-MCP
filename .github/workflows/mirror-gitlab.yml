@@ -1,0 +1,31 @@
+name: Mirror to GitLab
+
+# Keeps a GitLab copy of this repo in sync so GitLab CI/CD (.gitlab-ci.yml)
+# runs there too. Does nothing until you configure the repo:
+#   - Repository variable GITLAB_MIRROR_URL, e.g. gitlab.com/<user>/claude-team-mcp.git
+#   - Repository secret   GITLAB_TOKEN with a GitLab PAT (scope: write_repository)
+# Full walkthrough: examples/gitlab_setup.md
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    if: vars.GITLAB_MIRROR_URL != ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push main and tags to GitLab
+        env:
+          GITLAB_MIRROR_URL: ${{ vars.GITLAB_MIRROR_URL }}
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          git push --force "https://oauth2:${GITLAB_TOKEN}@${GITLAB_MIRROR_URL}" \
+            "refs/heads/main:refs/heads/main"
+          git push --force "https://oauth2:${GITLAB_TOKEN}@${GITLAB_MIRROR_URL}" \
+            --tags

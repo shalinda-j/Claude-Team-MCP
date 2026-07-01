@@ -1,0 +1,53 @@
+# GitLab CI/CD pipeline — runs the project's full test suite and package build
+# on GitLab (gitlab.com or self-hosted). Covers the same ground as
+# .github/workflows/ci.yml apart from that workflow's mcp SDK compatibility
+# legs and doctor smoke step, which stay GitHub-only for now.
+# See examples/gitlab_setup.md for how to connect the repo.
+
+stages:
+  - test
+  - build
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PYTHONUTF8: "1"
+
+default:
+  cache:
+    key: "pip-$CI_JOB_NAME"
+    paths:
+      - .cache/pip
+
+test:
+  stage: test
+  image: python:${PYTHON_VERSION}
+  parallel:
+    matrix:
+      - PYTHON_VERSION: ["3.10", "3.11", "3.12", "3.13"]
+  before_script:
+    - python -m pip install --upgrade pip
+    - pip install -e .[dev]
+  script:
+    - pytest -v
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+package:
+  stage: build
+  image: python:3.12
+  before_script:
+    - python -m pip install --upgrade pip build
+  script:
+    - python -m build
+    - pip install dist/*.whl
+    - python -c "import team_coordinator; assert callable(team_coordinator.main)"
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
