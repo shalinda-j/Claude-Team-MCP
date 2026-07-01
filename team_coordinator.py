@@ -3977,5 +3977,10 @@ tick();setInterval(tick,2000);
 </script></body></html>"""
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Console entry point (the `claude-team-mcp` command after `pip install`)."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
