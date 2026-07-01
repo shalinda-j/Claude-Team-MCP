@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented here.
 
+## v8.1
+- **Added — test suite:** 117 pytest tests under `tests/` covering the state
+  layer (atomic writes, corruption recovery, rotation, backups/restore), team
+  coordination (join/chat/mentions/presence/read receipts), the task board
+  (dependencies, sub-tasks, skills, auto-assign, templates, crash recovery),
+  project memory + second brain, structured debate (propose → critique →
+  revise → judge, votes, scoring), the security-findings lifecycle, the
+  intelligence layer (similarity search, routing, conflicts, metrics,
+  reports), the MCP hub/gateway (targets, vault masking, routes, rate
+  limiting, audit, OpenAPI adapter generator), and concurrent multi-writer
+  safety. Every test runs in an isolated temp dir — your real state files are
+  never touched.
+- **Added — CI:** GitHub Actions workflow (`.github/workflows/ci.yml`) runs
+  the suite on every push/PR across Python 3.10–3.13 on Linux plus a Windows
+  leg, and builds + smoke-tests the sdist/wheel.
+- **Added — packaging:** `pyproject.toml` so the server installs as a proper
+  package: `pip install git+https://github.com/shalinda-j/Claude-Team-MCP.git`
+  provides a `claude-team-mcp` console command (new `main()` entry point) that
+  any MCP client can register directly — no more copying files around.
+- **Changed:** documented minimum Python is now 3.10 (required by the `mcp`
+  SDK). README gained install-as-package instructions and a Development &
+  testing section.
+
 ## v8.0
 - **Added — MCP Hub / Gateway (21 tools):** the server can now act as a
   router/proxy in front of other tools. Register downstream MCP servers and REST

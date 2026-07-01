@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-team-mcp"
+version = "8.1.0"
+description = "MCP server that turns multiple AI coding agents (Claude Code, Cursor, Codex CLI, Gemini CLI) into a coordinated team that chats, debates, remembers, audits security, and works in parallel."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Shalinda Jayasinghe" }]
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.2.0",
+    "filelock>=3.12.0",
+]
+keywords = [
+    "mcp", "model-context-protocol", "claude", "claude-code", "cursor",
+    "codex", "gemini", "multi-agent", "agents", "team", "coordination",
+    "gateway", "openapi",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+]
+
+[project.urls]
+Homepage = "https://github.com/shalinda-j/Claude-Team-MCP"
+Repository = "https://github.com/shalinda-j/Claude-Team-MCP"
+Changelog = "https://github.com/shalinda-j/Claude-Team-MCP/blob/main/CHANGELOG.md"
+Issues = "https://github.com/shalinda-j/Claude-Team-MCP/issues"
+
+[project.scripts]
+claude-team-mcp = "team_coordinator:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools]
+py-modules = ["team_coordinator"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

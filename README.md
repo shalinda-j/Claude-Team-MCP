@@ -2,8 +2,9 @@
 
 > A Model Context Protocol (MCP) server that turns multiple AI coding agents — across Claude Code, Cursor, Codex CLI, Gemini CLI, or any MCP-compatible client — into a coordinated team that chats, debates, remembers, audits security, and works in parallel on the same project.
 
+[![CI](https://github.com/shalinda-j/Claude-Team-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/shalinda-j/Claude-Team-MCP/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![MCP](https://img.shields.io/badge/protocol-MCP-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 
@@ -54,7 +55,7 @@ A single agent has one perspective and one context window. Real engineering work
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.10+
 - [`mcp`](https://pypi.org/project/mcp/) and [`filelock`](https://pypi.org/project/filelock/)
 - At least one MCP-compatible client (Claude Code, Cursor, Codex CLI, Gemini CLI, …)
 
@@ -63,6 +64,24 @@ pip install -r requirements.txt
 ```
 
 ## Installation
+
+### Option A — install as a package (recommended)
+
+Install straight from GitHub; this pulls in the dependencies and gives you a
+`claude-team-mcp` command you can register with any client:
+
+```bash
+pip install git+https://github.com/shalinda-j/Claude-Team-MCP.git
+claude-team-mcp   # starts the MCP server on stdio
+```
+
+Then register the command with your client, e.g. for Claude Code:
+
+```bash
+claude mcp add team -s user -- env TEAM_STATE_FILE=~/mcp/shared_state.json claude-team-mcp
+```
+
+### Option B — run from a copy of the file
 
 1. Place `team_coordinator.py` somewhere stable, e.g. `D:\mcp\team_coordinator.py` (Windows) or `~/mcp/team_coordinator.py`.
 2. Install dependencies: `pip install mcp filelock`.
@@ -292,7 +311,10 @@ The **hub/gateway** keeps its registry, routes, and audit trail in their own loc
 ```
 claude-team-mcp/
 ├── team_coordinator.py     # the MCP server (all 94 tools, incl. the hub/gateway)
+├── pyproject.toml          # packaging: pip install => `claude-team-mcp` command
 ├── requirements.txt
+├── tests/                  # pytest suite (state, team, tasks, debate, gateway, …)
+├── .github/workflows/ci.yml  # CI: pytest on Linux + Windows, Python 3.10–3.13
 ├── examples/               # ready-to-copy client configs + gateway quick-start
 │   ├── claude_code.md
 │   ├── cursor_mcp.json
@@ -306,9 +328,26 @@ claude-team-mcp/
 └── README.md
 ```
 
+## Development & testing
+
+```bash
+git clone https://github.com/shalinda-j/Claude-Team-MCP.git
+cd Claude-Team-MCP
+pip install -e .[dev]
+pytest
+```
+
+The suite (117 tests) covers the state layer (atomic writes, rotation, backups),
+team coordination, the task board and workflows, project memory and the second
+brain, structured debate, security findings, the intelligence layer, the MCP
+hub/gateway (targets, vault, routing, rate limits, adapter generator), and
+concurrent multi-writer safety. Tests run against per-test temp directories and
+never touch your real state files. CI runs the suite on every push and pull
+request across Python 3.10–3.13 on Linux plus a Windows leg.
+
 ## Contributing
 
-Issues and pull requests are welcome. Please keep changes backwards-compatible with existing state files where possible, and include a note in `CHANGELOG.md`.
+Issues and pull requests are welcome. Please keep changes backwards-compatible with existing state files where possible, run `pytest` before submitting, and include a note in `CHANGELOG.md`.
 
 ## License
 
