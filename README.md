@@ -369,13 +369,17 @@ claude-team-mcp/
 ├── pyproject.toml          # packaging: pip install => `claude-team-mcp` command
 ├── requirements.txt
 ├── tests/                  # pytest suite (state, team, tasks, debate, gateway, …)
-├── .github/workflows/ci.yml  # CI: Linux + Windows, Python 3.10–3.13, both mcp SDK lines
+├── .github/workflows/
+│   ├── ci.yml              # CI: Linux + Windows, Python 3.10–3.13, both mcp SDK lines
+│   └── mirror-gitlab.yml   # optional: auto-mirror main to GitLab
+├── .gitlab-ci.yml          # GitLab CI/CD: same tests + package build
 ├── examples/               # ready-to-copy client configs + gateway quick-start
 │   ├── claude_code.md
 │   ├── cursor_mcp.json
 │   ├── codex_config.toml
 │   ├── gemini_settings.json
 │   ├── gateway_quickstart.md
+│   ├── gitlab_setup.md
 │   └── petstore_openapi.json
 ├── CHANGELOG.md
 ├── FEATURES_GUIDE.md
@@ -404,6 +408,18 @@ CI runs the suite on every push and pull request across Python 3.10–3.13 on
 Linux plus a Windows leg, on a weekly schedule, and against both `mcp` SDK
 lines pinned explicitly — so a dependency release that breaks the server is
 caught here rather than by the next person to run `pip install`.
+
+### GitLab CI/CD
+
+A GitLab pipeline ships too (`.gitlab-ci.yml`): the full test matrix on Python
+3.10–3.13 plus a package-build job with wheel artifacts. The two `mcp` SDK
+compatibility legs and the `doctor` smoke step are GitHub-only for now, so
+GitLab covers the suite but not the dependency matrix. It works on gitlab.com
+or any self-hosted instance with Docker runners — push the repo to a GitLab
+project and the pipeline runs with zero configuration. To
+keep GitLab in sync with GitHub automatically, enable the bundled
+`mirror-gitlab.yml` workflow (set one variable + one token). Full walkthrough:
+[`examples/gitlab_setup.md`](examples/gitlab_setup.md).
 
 ## Contributing
 

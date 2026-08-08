@@ -2,10 +2,29 @@
 
 All notable changes to this project are documented here.
 
+## v8.4
+
+Released as v8.4 rather than v8.2: this work was written against v8.1 but
+landed after the v8.3 fix release, and a version number cannot go backwards.
+
+- **Added — GitLab CI/CD:** `.gitlab-ci.yml` runs the full pytest suite on
+  Python 3.10–3.13 in parallel plus a package job (build sdist/wheel, install
+  it, smoke-test the `claude-team-mcp` entry point) with wheel artifacts kept
+  for a week. Works on gitlab.com and self-hosted instances with zero config —
+  just push the repo to a GitLab project.
+- **Added — GitHub → GitLab mirroring:** optional
+  `.github/workflows/mirror-gitlab.yml` force-pushes `main` (and tags) to a
+  GitLab project on every push, so the GitLab pipeline stays in sync
+  automatically. Dormant until you set the `GITLAB_MIRROR_URL` repo variable
+  and `GITLAB_TOKEN` secret.
+- **Added — docs:** `examples/gitlab_setup.md` walks through three ways to
+  connect the project to GitLab (second remote, automatic mirroring, GitLab
+  Premium pull mirroring) and documents what the pipeline runs.
+
 ## v8.3
 
-A fix release. v8.2 (GitLab CI/CD) is still open in PR #3 and is not included
-here; this builds on v8.1.
+A fix release building on v8.1. The GitLab CI/CD work landed separately, in
+v8.4.
 
 - **Fixed — the server would not start on a fresh install.** The `mcp` SDK
   released 2.0, which removed `mcp.server.fastmcp` and renamed `FastMCP` to
