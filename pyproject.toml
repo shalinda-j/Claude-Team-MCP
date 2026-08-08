@@ -4,14 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-team-mcp"
-version = "8.1.0"
+version = "8.3.0"
 description = "MCP server that turns multiple AI coding agents (Claude Code, Cursor, Codex CLI, Gemini CLI) into a coordinated team that chats, debates, remembers, audits security, and works in parallel."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Shalinda Jayasinghe" }]
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.2.0",
+    # Supports both SDK lines: 1.x exposes FastMCP, 2.x renamed it to MCPServer
+    # and the server imports whichever is present. Capped so a future 3.0 with
+    # another rename cannot silently break installs.
+    "mcp>=1.2.0,<3",
     "filelock>=3.12.0",
 ]
 keywords = [

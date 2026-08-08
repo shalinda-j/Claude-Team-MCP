@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Weekly, so a dependency that breaks us in a release we didn't ask for is
+    # caught here rather than by the next person to run pip install. The mcp
+    # 1.x -> 2.x rename shipped between pushes and went unnoticed exactly
+    # because nothing re-ran the suite in the meantime.
+    - cron: "0 6 * * 1"
 
 jobs:
   test:
@@ -34,6 +40,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .[dev]
 
+      - name: Run tests
+        run: pytest -v
+
+      - name: Self-check
+        run: claude-team-mcp doctor
+
+  sdk-compat:
+    # The server supports both mcp SDK lines through a compatibility shim.
+    # Pin each one explicitly so a break in either is attributable, instead of
+    # depending on whatever the resolver happens to pick that day.
+    name: pytest (mcp ${{ matrix.mcp }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mcp: ["<2", ">=2"]
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install with pinned mcp
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+          pip install "mcp${{ matrix.mcp }}"
+      - name: Show which API the shim selected
+        run: python -c "import team_coordinator as t; print(t._MCP_API)"
       - name: Run tests
         run: pytest -v
 

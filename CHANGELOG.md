@@ -2,6 +2,51 @@
 
 All notable changes to this project are documented here.
 
+## v8.3
+
+A fix release. v8.2 (GitLab CI/CD) is still open in PR #3 and is not included
+here; this builds on v8.1.
+
+- **Fixed — the server would not start on a fresh install.** The `mcp` SDK
+  released 2.0, which removed `mcp.server.fastmcp` and renamed `FastMCP` to
+  `MCPServer` in `mcp.server.mcpserver`. Because the dependency was declared as
+  `mcp>=1.2.0` with no upper bound, `pip install` resolved to 2.0 and the
+  server raised `ModuleNotFoundError` on import. The import is now a shim that
+  binds to whichever class the installed SDK provides, so **both SDK lines
+  work**, and the requirement is capped at `<3` so the next rename cannot break
+  installs silently. The full suite passes against `mcp<2` and `mcp>=2`.
+- **Fixed — the second brain wrote to a Windows drive letter on every
+  platform.** `BRAIN_DIR` defaulted to the literal `D:/mcp/second_brain`
+  regardless of OS, so on Linux and macOS notes landed in a directory named
+  `D:` under whatever the working directory happened to be. It now defaults to
+  `~/.claude_team_brain` off Windows, matching how `TEAM_STATE_FILE` already
+  behaved. `doctor` flags a leftover `D:` directory and says where to move it.
+- **Added — SSRF guard on the hub.** Targets are registered from
+  agent-supplied text, and the hub fetches them from its own network position
+  with its stored credentials available for injection, so
+  `http://169.254.169.254/` would have exposed cloud instance metadata.
+  Private, loopback, and link-local destinations are now refused at
+  registration, at call time (covering targets stored by earlier versions),
+  when the adapter generator fetches a spec by URL, and on every redirect hop.
+  Hostnames are judged against every address they resolve to. Blocked calls are
+  audited. `GATEWAY_ALLOW_PRIVATE=1` and `GATEWAY_ALLOWED_HOSTS` re-open
+  internal destinations deliberately.
+- **Added — `doctor`.** Both an MCP tool and a `claude-team-mcp doctor` CLI
+  subcommand. Reports Python and `mcp` SDK versions and which API the shim
+  bound to, whether `filelock` is installed, whether each path it writes to is
+  writable, vault file permissions, and the SSRF guard's mode — each with the
+  fix attached. Exits non-zero when something is broken, so it can gate a setup
+  script.
+- **Added — CI that catches this class of break.** A weekly `schedule` run, a
+  matrix leg per `mcp` SDK line pinned explicitly, and a `doctor` smoke step.
+  The 1.x → 2.x rename shipped between pushes and went unnoticed precisely
+  because nothing re-ran the suite in the meantime.
+- **Added — tests:** 44 new, 161 total. Cover the SSRF guard (internal
+  literals, IPv4-mapped IPv6, non-HTTP schemes, split-horizon DNS, redirect
+  hops, both escape hatches, and each enforcement point), the `doctor` report
+  across its OK/WARN/FAIL paths, and the platform-aware brain default. They
+  make no network or DNS calls.
+
 ## v8.1
 - **Added — test suite:** 117 pytest tests under `tests/` covering the state
   layer (atomic writes, corruption recovery, rotation, backups/restore), team
