@@ -112,6 +112,74 @@ def test_writes_still_work_once_the_lock_is_free():
     assert all(f"free-{i}" in texts for i in range(8))
 
 
+def test_memory_writers_lose_nothing():
+    """save_note went through _load() ... _save(state) -- a read-modify-write with
+    only the write half locked. 8 threads x 25 notes landed 25 of 200; four real
+    processes landed 60 of 80. post_message was collateral: correct itself, but
+    stomped by these writers rewriting the whole file from a stale snapshot."""
+    def worker(n):
+        for i in range(25):
+            tc.save_note(f"note {n}-{i}", by_role=f"agent{n}")
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    notes = tc._load()["notes"]
+    assert len(notes) == 200
+    seen = {n["text"] for n in notes}
+    assert all(f"note {n}-{i}" in seen for n in range(8) for i in range(25))
+
+
+def test_mixed_writers_do_not_stomp_each_other():
+    """Different tools writing concurrently must all survive together."""
+    def notes():
+        for i in range(20):
+            tc.save_note(f"n{i}", by_role="A")
+
+    def facts():
+        for i in range(20):
+            tc.set_fact(f"k{i}", f"v{i}", by_role="B")
+
+    def msgs():
+        for i in range(20):
+            tc.post_message("C", f"m{i}")
+
+    threads = [threading.Thread(target=fn) for fn in (notes, facts, msgs)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    state = tc._load()
+    assert len(state["notes"]) == 20
+    assert len(state["facts"]) == 20
+    assert len([m for m in state["messages"] if m["text"].startswith("m")]) == 20
+
+
+def test_stale_snapshot_is_refused_not_written():
+    """The guard that catches any future _load()/_save() pair."""
+    snapshot = tc._load()
+    tc.post_message("PM", "written by someone else")
+    with pytest.raises(tc.StaleWrite, match="refusing to overwrite"):
+        tc._save(snapshot)
+    texts = {m["text"] for m in tc._load()["messages"]}
+    assert "written by someone else" in texts
+
+
+def test_reset_team_is_not_treated_as_stale():
+    tc.join_team("PM")
+    tc.reset_team(keep_memory=False)
+    assert tc._load()["agents"] == {}
+    tc.join_team("PM")
+    tc.save_note("keep me", by_role="PM")
+    tc.reset_team(keep_memory=True)
+    assert tc._load()["agents"] == {}
+    assert len(tc._load()["notes"]) == 1
+
+
 def test_state_file_valid_json_after_burst():
     for i in range(30):
         tc.set_fact(f"key{i}", f"value{i}")
