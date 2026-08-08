@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from conftest import OPERATOR_TOKEN
 import team_coordinator as tc
 
 
@@ -97,7 +98,7 @@ def test_allowlist_is_shown(monkeypatch):
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_world_readable_vault_warns():
-    tc.gateway_set_credential("k", "s3cret")
+    tc.gateway_set_credential("k", "s3cret", targets="*", operator_token=OPERATOR_TOKEN)
     tc.GATEWAY_VAULT.chmod(0o644)
     rows = _rows_by_label(tc._doctor_rows())
     assert rows["Vault perms"][0] == tc._WARN
@@ -106,14 +107,15 @@ def test_world_readable_vault_warns():
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_owner_only_vault_passes():
-    tc.gateway_set_credential("k", "s3cret")
+    tc.gateway_set_credential("k", "s3cret", targets="*", operator_token=OPERATOR_TOKEN)
     tc.GATEWAY_VAULT.chmod(0o600)
     rows = _rows_by_label(tc._doctor_rows())
     assert rows["Vault perms"][0] == tc._OK
 
 
 def test_vault_secrets_are_never_printed():
-    tc.gateway_set_credential("stripe_key", "sk_live_TOPSECRET")
+    tc.gateway_set_credential("stripe_key", "sk_live_TOPSECRET", targets="*",
+                            operator_token=OPERATOR_TOKEN)
     assert "sk_live_TOPSECRET" not in tc._doctor_text()
 
 

@@ -2,6 +2,7 @@
 
 import json
 
+from conftest import OPERATOR_TOKEN
 import team_coordinator as tc
 
 
@@ -29,7 +30,7 @@ def _register():
     tc.gateway_register_rest(
         "petstore", "https://petstore.example.com/v1",
         description="pets api", auth_type="header", auth_name="X-API-Key",
-        credential_key="petstore_key", tags="pets,animals", by_role="PM")
+        credential_key="petstore_key", tags="pets,animals", by_role="PM", operator_token=OPERATOR_TOKEN)
 
 
 # --- Target registry ---
@@ -43,19 +44,19 @@ def test_register_rest_target():
 
 
 def test_register_requires_name_and_url():
-    assert "required" in tc.gateway_register_rest("", "")
+    assert "required" in tc.gateway_register_rest("", "", operator_token=OPERATOR_TOKEN)
 
 
 def test_reregister_updates():
     _register()
-    out = tc.gateway_register_rest("petstore", "https://petstore2.example.com", by_role="PM")
+    out = tc.gateway_register_rest("petstore", "https://petstore2.example.com", by_role="PM", operator_token=OPERATOR_TOKEN)
     assert "Updated" in out
     assert tc._gw_load()["targets"]["petstore"]["base_url"] == "https://petstore2.example.com"
 
 
 def test_list_targets_and_filter():
     _register()
-    tc.gateway_register_rest("billing", "https://billing.example.com", tags="payments")
+    tc.gateway_register_rest("billing", "https://billing.example.com", tags="payments", operator_token=OPERATOR_TOKEN)
     out = tc.gateway_list_targets()
     assert "petstore" in out and "billing" in out
     only_pets = tc.gateway_list_targets(tag="pets")
@@ -64,30 +65,31 @@ def test_list_targets_and_filter():
 
 def test_toggle_and_unregister():
     _register()
-    tc.gateway_toggle("petstore", enabled=False)
+    tc.gateway_toggle("petstore", enabled=False, operator_token=OPERATOR_TOKEN)
     assert tc._gw_load()["targets"]["petstore"]["enabled"] is False
-    out = tc.gateway_unregister("petstore")
+    out = tc.gateway_unregister("petstore", operator_token=OPERATOR_TOKEN)
     assert "petstore" not in tc._gw_load()["targets"]
 
 
 # --- Vault ---
 
 def test_vault_set_list_delete_never_leaks_value():
-    out = tc.gateway_set_credential("stripe_key", "sk_live_supersecret123", by_role="PM")
+    out = tc.gateway_set_credential("stripe_key", "sk_live_supersecret123", targets="petstore",
+                                    by_role="PM", operator_token=OPERATOR_TOKEN)
     assert "sk_live_supersecret123" not in out  # masked
     listing = tc.gateway_list_credentials()
     assert "stripe_key" in listing
     assert "supersecret" not in listing
-    assert "Deleted" in tc.gateway_delete_credential("stripe_key")
-    assert "No credential" in tc.gateway_delete_credential("stripe_key")
+    assert "Deleted" in tc.gateway_delete_credential("stripe_key", operator_token=OPERATOR_TOKEN)
+    assert "No credential" in tc.gateway_delete_credential("stripe_key", operator_token=OPERATOR_TOKEN)
 
 
 def test_vault_requires_key_and_value():
-    assert "required" in tc.gateway_set_credential("", "")
+    assert "required" in tc.gateway_set_credential("", "", operator_token=OPERATOR_TOKEN)
 
 
 def test_vault_stored_separately_from_state():
-    tc.gateway_set_credential("k", "v")
+    tc.gateway_set_credential("k", "v", targets="*", operator_token=OPERATOR_TOKEN)
     assert tc.GATEWAY_VAULT.exists()
     raw_state = tc.STATE_FILE.read_text(encoding="utf-8") if tc.STATE_FILE.exists() else ""
     assert "v" == json.loads(tc.GATEWAY_VAULT.read_text(encoding="utf-8"))["k"]
@@ -155,7 +157,7 @@ def test_audit_records_registrations():
 # --- Adapter generator ---
 
 def test_generate_adapter_from_inline_spec():
-    out = tc.gateway_generate_adapter(PETSTORE_SPEC, by_role="PM")
+    out = tc.gateway_generate_adapter(PETSTORE_SPEC, by_role="PM", operator_token=OPERATOR_TOKEN)
     assert "Generated MCP adapter 'petstore'" in out
     assert "3 tools" in out
     adapter = tc.ADAPTER_DIR / "petstore.py"
@@ -173,15 +175,15 @@ def test_generate_adapter_from_inline_spec():
 
 
 def test_generate_adapter_detects_auth():
-    tc.gateway_generate_adapter(PETSTORE_SPEC)
+    tc.gateway_generate_adapter(PETSTORE_SPEC, operator_token=OPERATOR_TOKEN)
     auth = tc._gw_load()["targets"]["petstore"]["auth"]
     assert auth["type"] == "header"
     assert auth["name"] == "X-API-Key"
 
 
 def test_generate_adapter_rejects_bad_spec():
-    assert "Could not load spec" in tc.gateway_generate_adapter("not json at all")
-    assert "no 'paths'" in tc.gateway_generate_adapter('{"openapi": "3.0.0"}')
+    assert "Could not load spec" in tc.gateway_generate_adapter("not json at all", operator_token=OPERATOR_TOKEN)
+    assert "no 'paths'" in tc.gateway_generate_adapter('{"openapi": "3.0.0"}', operator_token=OPERATOR_TOKEN)
 
 
 def test_spec_helpers():

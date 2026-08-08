@@ -2,6 +2,71 @@
 
 All notable changes to this project are documented here.
 
+## v8.5
+
+A hardening release, from an audit of the whole project against HashiCorp Vault
+as the reference. **Contains a breaking change** — see the operator gate below.
+
+- **BREAKING — target registration and vault writes are operator-gated.**
+  `gateway_register_mcp` takes a command and arguments and the hub spawns them,
+  so any agent that could call it could run anything as the hub user; and a
+  credential was usable by whatever target named it, so an agent could register
+  a target pointing at a host it controlled, reference someone else's key, and
+  read the secret out of the response. Both defeat the documented promise that
+  agents never see the keys. `gateway_register_rest`, `gateway_register_mcp`,
+  `gateway_unregister`, `gateway_toggle`, `gateway_set_credential`,
+  `gateway_delete_credential`, and `gateway_generate_adapter` now require
+  `operator_token`, matched against `TEAM_OPERATOR_TOKEN` in the server's
+  environment. Chat, board, debate, memory, and calling existing targets are
+  unchanged. **Set `TEAM_OPERATOR_TOKEN` before upgrading if you use the hub.**
+- **Added — credential binding.** `gateway_set_credential` now requires
+  `targets`, naming which targets may use the key; anything else is refused at
+  call time and audited. `targets="*"` restores any-target use and must be said
+  explicitly. Keys stored earlier keep working, and `doctor` lists the unbound
+  ones.
+- **Fixed — silent write loss, the whole class.** v8.3's lock fix covered one
+  path; 13 tools still did `_load()` -> mutate -> `_save(state)`, an
+  unserialized read-modify-write. Four processes doing 20 `save_note` calls
+  each landed 60 of 80; 8 threads x 25 landed 25 of 200, and `post_message` was
+  collateral. `_save` now refuses a stale snapshot (`StaleWrite`), which also
+  catches any future site, and the hot paths moved to `_mutate`.
+- **Fixed — credentials survived a redirect to another host.** The SSRF guard
+  re-checked the destination, but stock `HTTPRedirectHandler` strips only
+  `content-length` and `content-type`, so the injected `Authorization` header
+  rode along — and the new host passed the check precisely because it was
+  public. Auth headers are now dropped on a cross-host hop.
+- **Fixed — credentials reached callers in error text.** `auth_type="query"`
+  puts the secret in the URL, and `http.client` raises `InvalidURL` with the
+  full selector in its message; `InvalidURL` subclasses `HTTPException`, not
+  `OSError`, so urllib's wrapper never caught it. A space in a path was enough.
+  Everything returned from a proxied call is now redacted.
+- **Fixed — CGNAT `100.64.0.0/10` bypassed the SSRF guard** on Python 3.10/3.11,
+  where it is not yet `is_private`. The check now tests `is_global` first.
+- **Fixed — `webhook_notify` was an unguarded outbound sink.** An agent could
+  reach cloud metadata there while the gateway refused the identical URL.
+- **Fixed — `gateway_generate_adapter` wrote anywhere.** `out_path` is now
+  contained to `ADAPTER_DIR`; it accepted absolute paths and `..` walks, and the
+  content is spec-derived.
+- **Fixed — every agent went permanently deaf once the channel rotated.**
+  Message indices were positions in the retained list, and rotation renumbered
+  them. A caught-up agent held `next_index == len(messages)`; once the channel
+  was pinned at `MSG_ROTATE_LIMIT` that length stopped growing, so
+  `total > since_index` was never true again — `read_channel` and
+  `wait_for_message` returned "no new messages" forever, `@mentions` included,
+  with no error. An agent that was behind had its indices reused underneath it,
+  so it skipped whatever had rotated out and mislabelled the rest.
+  `archived_messages` already counted the drops; nothing translated with it.
+  Indices are now absolute — the nth message posted keeps index n after it
+  rotates out — and a reader that fell behind is told how many it missed rather
+  than being handed the wrong messages under right-looking numbers. Below
+  rotation the numbers are unchanged, so indices an agent already holds stay
+  valid across the upgrade.
+- **Fixed — `read_receipts` under-reported anyone who passed an explicit
+  index.** `acknowledge(up_to_index=-1)` stored a count while an explicit index
+  stored the index itself, so the two meant different things and the comparison
+  only worked for one of them. Both now store "read everything below this".
+- **Added — tests:** 43 new (204 total), green against both `mcp<2` and `mcp>=2`.
+
 ## v8.4
 
 Released as v8.4 rather than v8.2: this work was written against v8.1 but
