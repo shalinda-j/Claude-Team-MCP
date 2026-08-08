@@ -29,10 +29,16 @@ os.environ.setdefault("ADAPTER_DIR", str(Path(_IMPORT_TMP) / "adapters"))
 
 import team_coordinator as tc  # noqa: E402
 
+# Registering targets and writing vault keys is operator-gated. Tests exercise
+# those tools, so the suite configures a token and passes it explicitly -- never
+# by stubbing the gate out, so a regression that drops the check still fails.
+OPERATOR_TOKEN = "test-operator-token"
+
 
 @pytest.fixture(autouse=True)
 def isolated_state(tmp_path, monkeypatch):
     """Redirect every persistent path to a per-test temp dir."""
+    monkeypatch.setattr(tc, "OPERATOR_TOKEN", OPERATOR_TOKEN)
     state_file = tmp_path / "state.json"
     brain_dir = tmp_path / "brain"
     monkeypatch.setattr(tc, "STATE_FILE", state_file)

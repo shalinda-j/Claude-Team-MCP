@@ -326,6 +326,61 @@ each with the fix attached. It exits non-zero if anything is broken, so it can
 be dropped into a setup script. `doctor` is also available as an MCP tool, so
 an agent can diagnose its own environment.
 
+## Operator gate and credential binding
+
+> **Breaking in v8.5.** Registering targets and writing vault keys now need an
+> operator token. If you use the hub, set `TEAM_OPERATOR_TOKEN` before upgrading.
+
+The vault's promise is that agents never see the keys. Two things broke it.
+
+`gateway_register_mcp` takes a command and arguments and the hub spawns them, so
+any agent that could call it could run anything as the hub user. And a
+credential was usable by whatever target named it — so an agent could register a
+target pointing at a host it controlled, reference a key it had no business
+touching, and read the secret straight out of the response.
+
+The attacker to picture here is not a rogue operator. It is text: an agent
+summarising a web page, reading an issue, or following a spec, steered into
+calling a tool you never asked for. So the boundary is between *you did this*
+and *the agent decided to*.
+
+**Operator token.** Set it in the server's environment:
+
+```bash
+claude mcp add team -s user -- env TEAM_STATE_FILE=~/mcp/shared_state.json \
+  TEAM_OPERATOR_TOKEN='a secret you choose' claude-team-mcp
+```
+
+These tools then require `operator_token`: `gateway_register_rest`,
+`gateway_register_mcp`, `gateway_unregister`, `gateway_toggle`,
+`gateway_set_credential`, `gateway_delete_credential`,
+`gateway_generate_adapter`. Everything else — chat, board, debate, memory, and
+calling targets that already exist — is unchanged and needs nothing.
+
+You hand the token over for the turn in which you want a registration to happen.
+Injected text cannot supply a token it has never seen. **Honest limit:** once you
+paste it, that agent has it for the rest of the session and could reuse it. This
+bounds spontaneous and injected action, not a fully compromised agent — rotate
+the token if you think one has been.
+
+With no token set, the gated tools stay closed and say how to open them.
+
+**Credential binding.** A key declares which targets may use it:
+
+```
+gateway_set_credential(key="stripe_key", value="sk_live_...",
+                       targets="stripe,billing", operator_token="...")
+```
+
+A target not on the list is refused at call time, and the refusal is audited.
+`targets="*"` restores the old any-target behaviour, and has to be said out
+loud. Keys stored before this existed keep working; `doctor` lists them so you
+can bind them deliberately rather than leaving them open by accident.
+
+`gateway_generate_adapter` also writes only inside `ADAPTER_DIR` now — `out_path`
+was unconstrained, and the file's contents come from a spec that is usually
+fetched over the network.
+
 ## SSRF guard
 
 The hub fetches URLs that agents supply, from the hub's own network position

@@ -9,6 +9,7 @@ import urllib.error
 
 import pytest
 
+from conftest import OPERATOR_TOKEN
 import team_coordinator as tc
 
 
@@ -104,7 +105,7 @@ def test_allowlist_matches_subdomains(monkeypatch, public_dns):
 # --- Enforcement points ---
 
 def test_register_rest_refuses_internal_target():
-    out = tc.gateway_register_rest("meta", "http://169.254.169.254/", by_role="PM")
+    out = tc.gateway_register_rest("meta", "http://169.254.169.254/", by_role="PM", operator_token=OPERATOR_TOKEN)
     assert "Refused to register" in out
     assert "meta" not in tc._gw_load().get("targets", {})
 
@@ -141,10 +142,10 @@ def test_redirect_to_internal_address_is_refused():
 
 
 def test_adapter_generator_refuses_internal_spec_url():
-    out = tc.gateway_generate_adapter("http://169.254.169.254/openapi.json")
+    out = tc.gateway_generate_adapter("http://169.254.169.254/openapi.json", operator_token=OPERATOR_TOKEN)
     assert "Could not load spec" in out and "refused to fetch spec" in out
 
 
 def test_public_target_still_registers(public_dns):
-    out = tc.gateway_register_rest("stripe", "https://api.stripe.com/v1", by_role="PM")
+    out = tc.gateway_register_rest("stripe", "https://api.stripe.com/v1", by_role="PM", operator_token=OPERATOR_TOKEN)
     assert "Registered" in out
