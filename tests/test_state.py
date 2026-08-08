@@ -1,8 +1,34 @@
 """State layer: defaults, atomic writes, rotation, backups, restore, reset."""
 
 import json
+import sys
+from pathlib import Path
+
+import pytest
 
 import team_coordinator as tc
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="D: is a real drive here")
+def test_second_brain_default_is_not_a_windows_drive_letter():
+    # Before v8.3 this defaulted to the literal "D:/mcp/second_brain" on every
+    # platform, which created a directory named "D:" wherever the server was
+    # started from instead of a real home-relative path.
+    default = Path(tc._DEFAULT_BRAIN)
+    assert "D:" not in default.parts
+    assert default.is_absolute()
+    assert default.is_relative_to(Path.home())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only default")
+def test_second_brain_default_on_windows_keeps_the_shared_drive_path():
+    assert tc._DEFAULT_BRAIN == "D:/mcp/second_brain"
+
+
+def test_state_and_brain_defaults_agree_on_platform_style():
+    # Both paths are platform-aware, so neither should be absolute-Windows on
+    # POSIX or home-relative on Windows.
+    assert (Path(tc._DEFAULT_STATE).drive == "") == (Path(tc._DEFAULT_BRAIN).drive == "")
 
 
 def test_default_state_has_all_keys():

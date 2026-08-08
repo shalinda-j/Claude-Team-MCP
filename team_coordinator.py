@@ -10,10 +10,12 @@ and keep a self-contained "second brain" knowledge graph.
 v1: shared channel + task board
 v2: wait_for_message (live conversation, no manual polling)
 v3: project memory -> notes, facts, summaries, activity log
-v4: auto-spawn terminals (Windows) + self-contained second brain on D:\\
+v4: auto-spawn terminals (Windows) + self-contained second brain
 v5: structured debate (propose -> critique -> revise -> judge)
 v6: file locking + atomic writes (safe concurrent multi-CLI access),
     stale-agent cleanup, activity-log rotation, shared-path default.
+v8.3: runs on mcp SDK 1.x and 2.x, platform-aware second-brain path,
+    gateway SSRF guard, and a `doctor` self-check.
 
 CROSS-CLI: every client that points at the SAME state file shares one world.
 Default is a shared absolute path so mixing tools "just works":
@@ -34,7 +36,16 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+# The mcp SDK renamed FastMCP -> MCPServer and moved the module in v2.0. The two
+# classes are API-compatible for what this server uses (constructor, .tool(),
+# .run()), so import whichever the installed SDK provides and keep working on
+# both release lines. `doctor` reports which path was taken.
+try:
+    from mcp.server.fastmcp import FastMCP as _MCPServer
+    _MCP_API = "mcp.server.fastmcp.FastMCP"
+except ImportError:  # mcp >= 2.0
+    from mcp.server.mcpserver import MCPServer as _MCPServer
+    _MCP_API = "mcp.server.mcpserver.MCPServer"
 
 # Optional robust file locking. Falls back gracefully if not installed.
 try:
@@ -43,7 +54,7 @@ try:
 except Exception:
     _HAS_FILELOCK = False
 
-mcp = FastMCP("team-coordinator")
+mcp = _MCPServer("team-coordinator")
 
 # --- Shared team/memory state ---
 # Default to a shared absolute path so multiple CLIs/IDEs converge on one world.
@@ -51,8 +62,11 @@ _DEFAULT_STATE = "D:/mcp/shared_state.json" if sys.platform == "win32" else str(
 STATE_FILE = Path(os.environ.get("TEAM_STATE_FILE", _DEFAULT_STATE))
 LOCK_FILE = Path(str(STATE_FILE) + ".lock")
 
-# --- Second brain storage (self-contained, default on D:\) ---
-BRAIN_DIR = Path(os.environ.get("BRAIN_DIR", "D:/mcp/second_brain"))
+# --- Second brain storage (self-contained) ---
+# Platform-aware like the state file: a bare "D:/..." default would create a
+# directory literally named "D:" in the cwd on Linux/macOS.
+_DEFAULT_BRAIN = "D:/mcp/second_brain" if sys.platform == "win32" else str(Path.home() / ".claude_team_brain")
+BRAIN_DIR = Path(os.environ.get("BRAIN_DIR", _DEFAULT_BRAIN))
 BRAIN_FILE = BRAIN_DIR / "brain.json"
 BRAIN_LOCK = Path(str(BRAIN_FILE) + ".lock")
 
@@ -847,7 +861,7 @@ def close_agent(role: str, by_role: str = "") -> str:
 
 @mcp.tool()
 def brain_add(title: str, content: str, category: str = "", tags: str = "") -> str:
-    """Add a note to your self-contained second brain (stored on disk at D:\\mcp\\second_brain).
+    """Add a note to your self-contained second brain (stored on disk under BRAIN_DIR).
     Use for ideas, knowledge, references -- anything you want to recall later.
 
     Args:
@@ -2841,6 +2855,104 @@ GATEWAY_AUDIT_LIMIT = int(os.environ.get("GATEWAY_AUDIT_LIMIT", "2000"))
 GATEWAY_CALL_TIMEOUT = int(os.environ.get("GATEWAY_CALL_TIMEOUT", "30"))
 GATEWAY_MAX_OPS = int(os.environ.get("GATEWAY_MAX_OPS", "150"))
 
+# --- SSRF guard -------------------------------------------------------------
+# Targets are registered by agents, and agents act on model-generated or
+# user-supplied text. Unguarded, "register a REST target at
+# http://169.254.169.254/" turns the hub into a proxy for cloud instance
+# metadata -- reached from the hub's network position, with the hub's stored
+# credentials available for injection. So private, loopback, and link-local
+# destinations are refused by default.
+#   GATEWAY_ALLOW_PRIVATE=1     -- allow them again (localhost/LAN development)
+#   GATEWAY_ALLOWED_HOSTS=a,b   -- pin the hub to an explicit host allowlist,
+#                                  which also permits private hosts named in it
+GATEWAY_ALLOW_PRIVATE = os.environ.get("GATEWAY_ALLOW_PRIVATE", "").strip().lower() in ("1", "true", "yes", "on")
+GATEWAY_ALLOWED_HOSTS = [h.strip().lower() for h in
+                         os.environ.get("GATEWAY_ALLOWED_HOSTS", "").split(",") if h.strip()]
+
+import ipaddress as _ipaddr
+import socket as _socket
+
+
+def _gw_host_allowlisted(host: str) -> bool:
+    """True if host exactly matches, or is a subdomain of, an allowlist entry."""
+    h = (host or "").lower().rstrip(".")
+    return any(h == a or h.endswith("." + a) for a in GATEWAY_ALLOWED_HOSTS)
+
+
+def _gw_ip_is_internal(ip: str) -> bool:
+    try:
+        addr = _ipaddr.ip_address(ip)
+    except ValueError:
+        return False
+    # ::ffff:169.254.169.254 and friends must be judged on the mapped v4 address.
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+    return bool(addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified)
+
+
+def _gw_url_blocked(url: str) -> str:
+    """Return "" if this URL may be fetched, otherwise a human-readable reason.
+
+    Note: this resolves DNS to judge the destination, so a name that changes
+    between the check and the connection (DNS rebinding) is not fully covered.
+    Closing that would mean pinning the resolved IP into the socket; the check
+    runs at register time, at call time, and on every redirect hop instead.
+    """
+    try:
+        parts = _urlparse.urlparse(url)
+    except Exception as e:
+        return f"could not parse URL ({e})"
+    if parts.scheme not in ("http", "https"):
+        return f"scheme '{parts.scheme or '?'}' is not allowed (use http or https)"
+    host = parts.hostname
+    if not host:
+        return "URL has no host"
+    if _gw_host_allowlisted(host):
+        return ""
+    if GATEWAY_ALLOWED_HOSTS:
+        return (f"host '{host}' is not in GATEWAY_ALLOWED_HOSTS "
+                f"({', '.join(GATEWAY_ALLOWED_HOSTS)})")
+    if GATEWAY_ALLOW_PRIVATE:
+        return ""
+    # A literal IP needs no lookup; a name is checked against every address it
+    # resolves to, so a name with one public and one internal record is refused.
+    try:
+        infos = _socket.getaddrinfo(host, parts.port or (443 if parts.scheme == "https" else 80),
+                                    proto=_socket.IPPROTO_TCP)
+        ips = {i[4][0] for i in infos}
+    except Exception:
+        # Unresolvable right now. The connection would fail anyway, and the
+        # check re-runs at call time, so don't block registration on it.
+        return ""
+    internal = sorted(ip for ip in ips if _gw_ip_is_internal(ip))
+    if internal:
+        return (f"host '{host}' resolves to internal address {internal[0]} — refused to "
+                f"prevent SSRF. Set GATEWAY_ALLOW_PRIVATE=1, or list the host in "
+                f"GATEWAY_ALLOWED_HOSTS, if this is intentional.")
+    return ""
+
+
+class _GwSafeRedirect(_urlreq.HTTPRedirectHandler):
+    """Re-check every redirect hop.
+
+    urlopen follows redirects on its own, so a public URL answering 302 with a
+    Location of http://169.254.169.254/ would otherwise walk straight past a
+    check done only on the URL we were given.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        reason = _gw_url_blocked(newurl)
+        if reason:
+            raise _urlerr.URLError(f"blocked redirect to {newurl}: {reason}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _gw_open(req, timeout: int):
+    """urlopen for hub traffic, with redirect hops re-checked by the SSRF guard."""
+    return _urlreq.build_opener(_GwSafeRedirect).open(req, timeout=timeout)
+
 # In-memory sliding-window rate counters (the hub is a single long-lived process,
 # so this avoids write-amplifying the audit file on every call).
 _GW_RATE = _collections.defaultdict(_collections.deque)
@@ -3070,6 +3182,9 @@ def gateway_register_rest(name: str, base_url: str, description: str = "",
     """Register a REST API as a hub target. Agents then call it via gateway_call_rest
     WITHOUT ever seeing the credential -- the hub injects it at call time.
 
+    Private, loopback, and link-local base_urls are refused (SSRF guard); see
+    GATEWAY_ALLOW_PRIVATE / GATEWAY_ALLOWED_HOSTS to permit them deliberately.
+
     Args:
         name: Unique target name, e.g. "stripe".
         base_url: Base URL, e.g. "https://api.stripe.com/v1".
@@ -3083,6 +3198,9 @@ def gateway_register_rest(name: str, base_url: str, description: str = "",
     """
     if not name or not base_url:
         return "name and base_url are required."
+    blocked = _gw_url_blocked(base_url)
+    if blocked:
+        return f"Refused to register '{name}': {blocked}"
 
     def op(gw):
         existed = name in gw["targets"]
@@ -3567,10 +3685,16 @@ def gateway_call_rest(target: str, path: str = "", method: str = "GET",
     data = body.encode("utf-8") if body else None
     if data:
         headers.setdefault("Content-Type", "application/json")
+    # Re-check at call time: a target may have been registered before the guard
+    # was configured, and `path` can walk the URL somewhere new.
+    blocked = _gw_url_blocked(url)
+    if blocked:
+        _gw_mutate(lambda g: _gw_audit(g, agent, target, f"{method.upper()} {path}", "blocked", ok=False))
+        return f"Refused to call {target}: {blocked}"
     req = _urlreq.Request(url, data=data, headers=headers, method=method.upper())
     t0 = time.time()
     try:
-        with _urlreq.urlopen(req, timeout=GATEWAY_CALL_TIMEOUT) as resp:
+        with _gw_open(req, timeout=GATEWAY_CALL_TIMEOUT) as resp:
             code, text = resp.getcode(), resp.read().decode("utf-8", "replace")
     except _urlerr.HTTPError as e:
         code = e.code
@@ -3657,7 +3781,10 @@ def _gw_load_spec(spec: str):
     if s[0] in "{[":
         return json.loads(s)
     if s.startswith(("http://", "https://")):
-        with _urlreq.urlopen(s, timeout=20) as r:
+        blocked = _gw_url_blocked(s)
+        if blocked:
+            raise ValueError(f"refused to fetch spec: {blocked}")
+        with _gw_open(_urlreq.Request(s), timeout=20) as r:
             s = r.read().decode("utf-8", "replace")
     elif Path(s).exists():
         s = Path(s).read_text(encoding="utf-8")
@@ -3977,8 +4104,155 @@ tick();setInterval(tick,2000);
 </script></body></html>"""
 
 
+# ============================================================================
+# DOCTOR — self-check
+# Most breakage here is environmental rather than logical: an SDK that renamed
+# a module, a state path that isn't writable, filelock missing so concurrent
+# writes silently race. Those are invisible from inside a chat with an agent,
+# so `doctor` reports them in one place with the fix attached.
+# ============================================================================
+
+_OK, _WARN, _FAIL = "[ OK ]", "[WARN]", "[FAIL]"
+
+
+def _dr_writable(path: Path) -> str:
+    """Return "" if we can create and write inside `path`'s directory."""
+    d = path if path.suffix == "" else path.parent
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        probe = d / ".claude_team_write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return ""
+    except OSError as e:
+        return str(e)
+
+
+def _doctor_rows() -> list:
+    """Build the diagnostic table as (status, label, detail) rows."""
+    rows = []
+
+    # --- Python ---
+    v = sys.version_info
+    pyv = f"{v.major}.{v.minor}.{v.micro}"
+    if v < (3, 10):
+        rows.append((_FAIL, "Python", f"{pyv} — the mcp SDK needs 3.10+. Upgrade Python."))
+    else:
+        rows.append((_OK, "Python", f"{pyv} ({sys.platform})"))
+
+    # --- mcp SDK ---
+    try:
+        from importlib.metadata import version as _pkg_version
+        sdk = _pkg_version("mcp")
+    except Exception:
+        sdk = "unknown"
+    rows.append((_OK, "mcp SDK", f"{sdk} — using {_MCP_API}"))
+
+    # --- filelock ---
+    if _HAS_FILELOCK:
+        rows.append((_OK, "filelock", "installed — concurrent writes are locked"))
+    else:
+        rows.append((_WARN, "filelock", "MISSING — concurrent writes from multiple "
+                                        "clients can be lost. Fix: pip install filelock"))
+
+    # --- paths ---
+    for label, path, envvar in (
+        ("State file", STATE_FILE, "TEAM_STATE_FILE"),
+        ("Second brain", BRAIN_DIR, "BRAIN_DIR"),
+        ("Gateway config", GATEWAY_FILE, "GATEWAY_FILE"),
+        ("Backups", BACKUP_DIR, "TEAM_BACKUP_DIR"),
+    ):
+        err = _dr_writable(path)
+        if err:
+            rows.append((_FAIL, label, f"{path} — not writable ({err}). Set {envvar}."))
+        else:
+            exists = path.exists()
+            size = f", {path.stat().st_size} bytes" if exists and path.is_file() else ""
+            rows.append((_OK, label, f"{path} ({'exists' if exists else 'will be created'}{size})"))
+
+    # A pre-v8.3 default wrote the second brain to a literal "D:" directory on
+    # Linux/macOS. Point at it rather than leaving the notes silently orphaned.
+    stray = Path("D:") / "mcp" / "second_brain"
+    if sys.platform != "win32" and stray.exists():
+        rows.append((_WARN, "Legacy path", f"found notes at ./{stray} from the pre-v8.3 "
+                                           f"Windows-only default. Move them to {BRAIN_DIR}."))
+
+    # --- vault permissions ---
+    if GATEWAY_VAULT.exists():
+        if os.name == "posix":
+            mode = GATEWAY_VAULT.stat().st_mode & 0o777
+            if mode & 0o077:
+                rows.append((_WARN, "Vault perms", f"{GATEWAY_VAULT} is {oct(mode)} — should be "
+                                                   f"0o600. Fix: chmod 600 {GATEWAY_VAULT}"))
+            else:
+                rows.append((_OK, "Vault perms", f"{oct(mode)} (owner-only)"))
+        else:
+            rows.append((_OK, "Vault", f"{GATEWAY_VAULT} (Windows ACLs apply)"))
+        rows.append((_OK, "Vault keys", f"{len(_vault_load())} stored (values never shown)"))
+    else:
+        rows.append((_OK, "Vault", "no credentials stored yet"))
+
+    # --- SSRF guard ---
+    if GATEWAY_ALLOWED_HOSTS:
+        rows.append((_OK, "SSRF guard", f"allowlist: {', '.join(GATEWAY_ALLOWED_HOSTS)}"))
+    elif GATEWAY_ALLOW_PRIVATE:
+        rows.append((_WARN, "SSRF guard", "GATEWAY_ALLOW_PRIVATE is on — the hub may reach "
+                                          "private/loopback addresses. Fine for local dev, "
+                                          "risky if agents register targets they invent."))
+    else:
+        rows.append((_OK, "SSRF guard", "private/loopback/link-local targets refused (default)"))
+
+    # --- MCP client extras (needed for downstream MCP targets) ---
+    if _HAS_MCP_CLIENT:
+        rows.append((_OK, "Hub client", "MCP client extras available — MCP targets callable"))
+    else:
+        rows.append((_WARN, "Hub client", "MCP client extras unavailable — REST targets and the "
+                                          "adapter generator still work, gateway_call_tool does not"))
+
+    return rows
+
+
+def _doctor_text() -> str:
+    rows = _doctor_rows()
+    width = max(len(label) for _, label, _ in rows)
+    out = ["=== claude-team-mcp doctor ==="]
+    out += [f"{status} {label.ljust(width)}  {detail}" for status, label, detail in rows]
+    fails = sum(1 for s, _, _ in rows if s == _FAIL)
+    warns = sum(1 for s, _, _ in rows if s == _WARN)
+    if fails:
+        out.append(f"\n{fails} problem(s) and {warns} warning(s) — the server will not work "
+                   f"correctly until the [FAIL] lines are fixed.")
+    elif warns:
+        out.append(f"\nNo blocking problems, {warns} warning(s) worth a look.")
+    else:
+        out.append("\nAll checks passed.")
+    return "\n".join(out)
+
+
+@mcp.tool()
+def doctor() -> str:
+    """Diagnose this server's environment: Python and mcp SDK versions, file locking,
+    whether the state/brain/gateway/backup paths are writable, vault permissions, and
+    the SSRF guard mode. Run this first when something behaves unexpectedly.
+    """
+    return _doctor_text()
+
+
 def main() -> None:
-    """Console entry point (the `claude-team-mcp` command after `pip install`)."""
+    """Console entry point (the `claude-team-mcp` command after `pip install`).
+
+    With no arguments it speaks MCP on stdio, which is what a client expects.
+    `claude-team-mcp doctor` runs the self-check and exits instead, so the setup
+    can be verified without wiring up a client first.
+    """
+    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+        report = _doctor_text()
+        print(report)
+        sys.exit(1 if _FAIL in report else 0)
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help", "help"):
+        print("claude-team-mcp            start the MCP server on stdio (what clients run)\n"
+              "claude-team-mcp doctor     check this environment and print what to fix")
+        return
     mcp.run()
 
 

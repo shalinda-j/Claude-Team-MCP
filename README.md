@@ -52,6 +52,8 @@ A single agent has one perspective and one context window. Real engineering work
 - **Unified auth** — secrets live in a separate, owner-only (`chmod 600`) vault; the hub injects them at call time so agents never handle API keys.
 - **Rate-limiting + audit** — per-agent, per-target call limits and a central audit trail (who called what, when, status, latency) — useful for governance and security review.
 - **Auto-Adapter Generator** — point `gateway_generate_adapter` at an OpenAPI/Swagger spec (inline, file, or URL) and it writes a complete, runnable MCP server and auto-registers it as a hub target.
+- **SSRF guard** — the hub refuses private, loopback, and link-local destinations by default, at registration, at call time, and on every redirect hop, so an agent cannot point it at cloud instance metadata.
+- **Self-check** — `claude-team-mcp doctor` reports SDK versions, path writability, vault permissions, and guard settings, each with the fix attached.
 
 ## Requirements
 
@@ -62,6 +64,10 @@ A single agent has one perspective and one context window. Real engineering work
 ```bash
 pip install -r requirements.txt
 ```
+
+Both `mcp` SDK lines are supported: 1.x exposes the server class as `FastMCP`,
+2.x renamed it to `MCPServer`, and the server imports whichever is installed.
+Run `claude-team-mcp doctor` to see which one is in use.
 
 ## Installation
 
@@ -209,6 +215,9 @@ Routing: `gateway_add_route`, `gateway_remove_route`, `gateway_list_routes`, `ga
 Limits & audit: `gateway_set_limit`, `gateway_audit`, `gateway_usage`
 Proxy & generator: `gateway_call_rest`, `gateway_call_tool`, `gateway_generate_adapter`
 
+### Diagnostics
+`doctor`
+
 ### Reset
 `reset_team`
 
@@ -278,7 +287,7 @@ All settings are environment variables, set when you register the server.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `TEAM_STATE_FILE` | `D:/mcp/shared_state.json` (Windows) / `~/.claude_team_state.json` | Shared state path. **Use the same value for every client.** |
-| `BRAIN_DIR` | `D:/mcp/second_brain` | Where the second brain is stored. |
+| `BRAIN_DIR` | `D:/mcp/second_brain` (Windows) / `~/.claude_team_brain` | Where the second brain is stored. |
 | `MAX_AGENTS` | `6` | Auto-spawn safety limit. |
 | `AGENT_STALE_SECONDS` | `300` | Idle time before an agent is marked offline. |
 | `MSG_ROTATE_LIMIT` | `2000` | Channel size before old messages are archived out. |
@@ -290,6 +299,8 @@ All settings are environment variables, set when you register the server.
 | `GATEWAY_AUDIT_LIMIT` | `2000` | Gateway audit-trail size cap. |
 | `GATEWAY_CALL_TIMEOUT` | `30` | Timeout (s) for proxied REST calls. |
 | `GATEWAY_MAX_OPS` | `150` | Max operations generated from one OpenAPI spec. |
+| `GATEWAY_ALLOW_PRIVATE` | unset | Set to `1` to let the hub reach private/loopback/link-local addresses (see [SSRF guard](#ssrf-guard)). |
+| `GATEWAY_ALLOWED_HOSTS` | unset | Comma-separated allowlist; when set, the hub reaches only these hosts and their subdomains. |
 
 ## How it works
 
@@ -298,6 +309,50 @@ The server keeps all team state in a single JSON file. Every read is direct; eve
 `wait_for_message` implements lightweight long-polling with adaptive back-off: an agent calling it blocks until a new message appears, giving real-time conversation without busy-waiting.
 
 The **hub/gateway** keeps its registry, routes, and audit trail in their own locked file (`GATEWAY_FILE`), separate from team state so it survives `reset_team`. Secrets live in a separate `chmod 600` vault and are referenced by key — they are masked in every tool response and on the dashboard, and injected only at call time. To proxy a downstream MCP server the hub acts as an MCP *client*: it spawns the server with the resolved credentials, performs the handshake, forwards the call, and logs the result. REST proxying and the adapter generator use only the standard library, so they work even where the MCP client extras are unavailable.
+
+## Troubleshooting
+
+Run the self-check before anything else:
+
+```bash
+claude-team-mcp doctor          # installed as a package
+python team_coordinator.py doctor   # running from a file copy
+```
+
+It reports the Python and `mcp` SDK versions (and which API the server bound
+to), whether `filelock` is present, whether every path it writes to is
+writable, the vault's file permissions, and the SSRF guard's current mode —
+each with the fix attached. It exits non-zero if anything is broken, so it can
+be dropped into a setup script. `doctor` is also available as an MCP tool, so
+an agent can diagnose its own environment.
+
+## SSRF guard
+
+The hub fetches URLs that agents supply, from the hub's own network position
+and with the hub's stored credentials available for injection. Left open, an
+agent that registered `http://169.254.169.254/` would turn the gateway into a
+proxy for cloud instance metadata.
+
+So private, loopback, and link-local destinations are **refused by default**,
+at target registration, at call time (which also covers targets registered by
+an older version), when the adapter generator fetches a spec by URL, and on
+every redirect hop — a public URL that 302s to an internal address is refused
+too. Hostnames are checked against every address they resolve to, so a name
+with one public and one internal record does not slip through.
+
+Two escape hatches, for when reaching an internal service is the actual intent:
+
+```bash
+GATEWAY_ALLOW_PRIVATE=1                              # allow private/loopback again
+GATEWAY_ALLOWED_HOSTS=api.stripe.com,internal.corp   # or pin to an explicit allowlist
+```
+
+`GATEWAY_ALLOWED_HOSTS` matches a host exactly or as a subdomain, permits the
+hosts it names even when they are internal, and refuses everything else.
+
+Because the check resolves DNS to judge a destination, a name that changes
+between the check and the connection (DNS rebinding) is not fully covered;
+closing that would mean pinning the resolved address into the socket.
 
 ## Safety notes
 
@@ -310,11 +365,11 @@ The **hub/gateway** keeps its registry, routes, and audit trail in their own loc
 
 ```
 claude-team-mcp/
-├── team_coordinator.py     # the MCP server (all 94 tools, incl. the hub/gateway)
+├── team_coordinator.py     # the MCP server (all 96 tools, incl. the hub/gateway)
 ├── pyproject.toml          # packaging: pip install => `claude-team-mcp` command
 ├── requirements.txt
 ├── tests/                  # pytest suite (state, team, tasks, debate, gateway, …)
-├── .github/workflows/ci.yml  # CI: pytest on Linux + Windows, Python 3.10–3.13
+├── .github/workflows/ci.yml  # CI: Linux + Windows, Python 3.10–3.13, both mcp SDK lines
 ├── examples/               # ready-to-copy client configs + gateway quick-start
 │   ├── claude_code.md
 │   ├── cursor_mcp.json
@@ -337,13 +392,18 @@ pip install -e .[dev]
 pytest
 ```
 
-The suite (117 tests) covers the state layer (atomic writes, rotation, backups),
+The suite (161 tests) covers the state layer (atomic writes, rotation, backups),
 team coordination, the task board and workflows, project memory and the second
 brain, structured debate, security findings, the intelligence layer, the MCP
-hub/gateway (targets, vault, routing, rate limits, adapter generator), and
-concurrent multi-writer safety. Tests run against per-test temp directories and
-never touch your real state files. CI runs the suite on every push and pull
-request across Python 3.10–3.13 on Linux plus a Windows leg.
+hub/gateway (targets, vault, routing, rate limits, adapter generator), the SSRF
+guard, the `doctor` self-check, and concurrent multi-writer safety. Tests run
+against per-test temp directories and never touch your real state files, and
+make no network or DNS calls.
+
+CI runs the suite on every push and pull request across Python 3.10–3.13 on
+Linux plus a Windows leg, on a weekly schedule, and against both `mcp` SDK
+lines pinned explicitly — so a dependency release that breaks the server is
+caught here rather than by the next person to run `pip install`.
 
 ## Contributing
 
