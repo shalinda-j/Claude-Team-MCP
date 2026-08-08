@@ -122,18 +122,44 @@ BACKUP_EVERY = int(os.environ.get("BACKUP_EVERY", "15"))     # snapshot every N 
 HEARTBEAT_STALE = int(os.environ.get("HEARTBEAT_STALE", "120"))  # ping considered stale after N s
 
 
+class LockBusy(RuntimeError):
+    """The state lock could not be acquired, so nothing was written.
+
+    Raised rather than continuing unlocked. Every write here is a
+    read-modify-write of the whole state file, so an unserialized writer does
+    not corrupt one field -- it reloads a stale copy and drops every change
+    another client made in the meantime. Failing loudly lets the caller retry
+    (see safe_call); silently losing a teammate's message is not recoverable
+    and not detectable.
+    """
+
+
 class _Lock:
-    """Context manager: real FileLock if available, else a no-op (best effort)."""
+    """Context manager around FileLock, or a no-op if filelock is unavailable."""
+
+    _warned_unlocked = False
+
     def __init__(self, lock_path):
+        self._path = lock_path
         self._lock = FileLock(str(lock_path), timeout=LOCK_TIMEOUT) if _HAS_FILELOCK else None
+        if self._lock is None and not _Lock._warned_unlocked:
+            # Writes are unserialized in this environment. doctor reports it too,
+            # but say it once on stderr for anyone who never runs doctor.
+            _Lock._warned_unlocked = True
+            print("claude-team-mcp: filelock is not installed -- concurrent writes "
+                  "from multiple clients can be lost. Fix: pip install filelock",
+                  file=sys.stderr)
 
     def __enter__(self):
         if self._lock is not None:
             try:
                 self._lock.acquire()
             except LockTimeout:
-                # Proceed without the lock rather than deadlock the agent.
-                pass
+                raise LockBusy(
+                    f"Could not acquire the state lock ({self._path}) within "
+                    f"{LOCK_TIMEOUT}s -- another client is holding it. Nothing was "
+                    f"written; retry the call."
+                ) from None
         return self
 
     def __exit__(self, *exc):
