@@ -47,7 +47,25 @@ as the reference. **Contains a breaking change** — see the operator gate below
 - **Fixed — `gateway_generate_adapter` wrote anywhere.** `out_path` is now
   contained to `ADAPTER_DIR`; it accepted absolute paths and `..` walks, and the
   content is spec-derived.
-- **Added — tests:** 31 new (192 total), green against both `mcp<2` and `mcp>=2`.
+- **Fixed — every agent went permanently deaf once the channel rotated.**
+  Message indices were positions in the retained list, and rotation renumbered
+  them. A caught-up agent held `next_index == len(messages)`; once the channel
+  was pinned at `MSG_ROTATE_LIMIT` that length stopped growing, so
+  `total > since_index` was never true again — `read_channel` and
+  `wait_for_message` returned "no new messages" forever, `@mentions` included,
+  with no error. An agent that was behind had its indices reused underneath it,
+  so it skipped whatever had rotated out and mislabelled the rest.
+  `archived_messages` already counted the drops; nothing translated with it.
+  Indices are now absolute — the nth message posted keeps index n after it
+  rotates out — and a reader that fell behind is told how many it missed rather
+  than being handed the wrong messages under right-looking numbers. Below
+  rotation the numbers are unchanged, so indices an agent already holds stay
+  valid across the upgrade.
+- **Fixed — `read_receipts` under-reported anyone who passed an explicit
+  index.** `acknowledge(up_to_index=-1)` stored a count while an explicit index
+  stored the index itself, so the two meant different things and the comparison
+  only worked for one of them. Both now store "read everything below this".
+- **Added — tests:** 43 new (204 total), green against both `mcp<2` and `mcp>=2`.
 
 ## v8.4
 

@@ -313,6 +313,49 @@ def _log(state: dict, who: str, action: str) -> None:
 
 
 
+# --- Channel indexing -------------------------------------------------------
+# Message indices are ABSOLUTE: the nth message ever posted keeps index n for
+# good, even after it has been rotated out of the file. They used to be
+# positions in the retained list, which rotation silently renumbered:
+#
+#   - a caught-up agent held next_index == len(messages), and once the channel
+#     was pinned at MSG_ROTATE_LIMIT that length stopped growing, so
+#     `total > since_index` was never true again. Every agent went permanently
+#     deaf at 2000 messages, @mentions included, with no error.
+#   - an agent that was behind had its indices reused underneath it, so it
+#     skipped whatever rotated out and mislabelled what it did get.
+#
+# archived_messages already counted the drops; nothing translated with it.
+# Below rotation these are identical to the old positional values, so indices
+# an agent is already holding stay valid across the upgrade.
+
+def _msg_base(state) -> int:
+    """Absolute index of the oldest message still retained."""
+    return state.get("archived_messages", 0)
+
+
+def _msg_next_index(state) -> int:
+    """The absolute index a reader should ask for next."""
+    return _msg_base(state) + len(state.get("messages", []))
+
+
+def _msg_slice(state, since_index: int):
+    """Messages from absolute `since_index` on.
+
+    Returns (messages, absolute index of the first one, how many were missed).
+    `missed` is non-zero when the reader fell so far behind that what it asked
+    for has already been rotated out -- worth saying rather than quietly
+    handing back the wrong messages under the right-looking numbers.
+    """
+    base = _msg_base(state)
+    msgs = state.get("messages", [])
+    start = max(0, since_index) - base
+    missed = 0
+    if start < 0:
+        missed, start = -start, 0
+    return msgs[start:], base + start, missed
+
+
 def _format_msgs(msgs, start_index, my_role=""):
     lines = []
     for i, m in enumerate(msgs, start=start_index):
@@ -419,11 +462,15 @@ def read_channel(since_index: int = 0, my_role: str = "") -> str:
         my_role: Optional -- messages that @mention you are flagged.
     """
     state = _load()
-    msgs = state["messages"][since_index:]
+    msgs, first, missed = _msg_slice(state, since_index)
+    nxt = _msg_next_index(state)
     if not msgs:
-        return f"No new messages. next_index={len(state['messages'])}"
-    lines = _format_msgs(msgs, since_index, my_role)
-    lines.append(f"\nnext_index={len(state['messages'])}")
+        return f"No new messages. next_index={nxt}"
+    lines = []
+    if missed:
+        lines.append(f"({missed} older message(s) had already rotated out of the channel.)")
+    lines += _format_msgs(msgs, first, my_role)
+    lines.append(f"\nnext_index={nxt}")
     return "\n".join(lines)
 
 
@@ -442,10 +489,13 @@ def wait_for_message(since_index: int, my_role: str = "", timeout_seconds: int =
     last_touch = 0.0
     while time.time() < deadline:
         state = _read_state_unlocked()
-        total = len(state["messages"])
+        total = _msg_next_index(state)
         if total > since_index:
-            msgs = state["messages"][since_index:]
-            lines = _format_msgs(msgs, since_index, my_role)
+            msgs, first, missed = _msg_slice(state, since_index)
+            lines = []
+            if missed:
+                lines.append(f"({missed} older message(s) had already rotated out of the channel.)")
+            lines += _format_msgs(msgs, first, my_role)
             lines.append(f"\nnext_index={total}")
             return "\n".join(lines)
         # Refresh presence about every 30s so a waiting agent stays "online".
@@ -455,7 +505,7 @@ def wait_for_message(since_index: int, my_role: str = "", timeout_seconds: int =
             last_touch = now
         time.sleep(interval)
         interval = min(interval * 1.5, 2.0)  # back off up to 2s to cut file churn
-    total = len(_read_state_unlocked()["messages"])
+    total = _msg_next_index(_read_state_unlocked())
     return (f"No new messages after waiting {timeout_seconds}s. "
             f"next_index={total}. Call wait_for_message again to keep listening.")
 
@@ -2651,13 +2701,17 @@ def acknowledge(role: str, up_to_index: int = -1) -> str:
         up_to_index: Highest message index you've read. -1 = mark everything read.
     """
     def op(state):
-        total = len(state["messages"])
-        idx = total if up_to_index < 0 else min(up_to_index, total)
+        # Stored as a next-index ("read everything below this"), which is what
+        # -1 already recorded. An explicit up_to_index is the highest message
+        # read, so it needs the +1 -- without it the two forms meant different
+        # things and read_receipts under-reported anyone who passed an index.
+        total = _msg_next_index(state)
+        idx = total if up_to_index < 0 else min(max(0, up_to_index) + 1, total)
         state["read_state"][role] = idx
         _touch_agent(state, role)
         return idx, total
     idx, total = _mutate(op)
-    return f"@{role} acknowledged up to message {idx}/{total}."
+    return f"@{role} acknowledged {idx}/{total} messages."
 
 
 @mcp.tool()
@@ -2669,14 +2723,15 @@ def read_receipts(message_index: int = -1) -> str:
         message_index: The message index to check. -1 = latest message.
     """
     state = _load()
-    total = len(state["messages"])
+    total = _msg_next_index(state)
     if total == 0:
         return "No messages yet."
     target = total - 1 if message_index < 0 else message_index
     rs = state.get("read_state", {})
     seen, not_seen = [], []
     for role in state.get("agents", {}):
-        if rs.get(role, -1) > target:
+        # read_state holds a next-index, so having read `target` means > target.
+        if rs.get(role, 0) > target:
             seen.append(role)
         else:
             not_seen.append(role)
