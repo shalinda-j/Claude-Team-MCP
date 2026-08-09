@@ -2,6 +2,44 @@
 
 All notable changes to this project are documented here.
 
+## v8.6
+
+Dashboard hardening, continuing the audit against HashiCorp Vault.
+**Contains a breaking change** — the dashboard now needs a token.
+
+- **BREAKING — the dashboard requires a token.** It serves the full channel,
+  the task board, security findings, and the gateway's vault key names, and it
+  served all of that to anyone who could reach the port. Worse, both JSON
+  endpoints carried `Access-Control-Allow-Origin: *`, so binding to `127.0.0.1`
+  bought nothing: any page open in the user's browser could
+  `fetch('http://127.0.0.1:8765/api/state')` cross-origin and read it. The
+  wildcard is gone and `start_dashboard` now mints a random token per run and
+  returns it in the URL (`?t=…`); `DASHBOARD_TOKEN` keeps one URL across
+  restarts, and `X-Dashboard-Token` works as a header. **Open the whole URL
+  `start_dashboard` prints.**
+- **Fixed — stored XSS in three fields.** `role`, `assignee`, and `judge_role`
+  reached `innerHTML` unescaped and are validated nowhere, so
+  `join_team(role="<img src=x onerror=…>")` put a payload in front of every
+  viewer, re-firing every 2 seconds and persisting until `reset_team`. All
+  three are escaped now, along with six attribute slots that were one relaxed
+  validator away from the same bug.
+- **Fixed — `esc()` ignored quotes**, so any escaped value sitting inside an
+  HTML attribute was still injectable. It now escapes `& < > " ' \``.
+- **Added — security headers**: `Cache-Control: no-store`,
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer`, and a CSP whose `connect-src 'self'` leaves an
+  injected payload nowhere to send what it reads.
+- **Fixed — unknown paths returned 200 and the full dashboard.** They 404 now.
+  The `Server` header no longer discloses the Python patch version.
+- **Changed — `network_info`** still explains the `0.0.0.0` bind for LAN
+  viewing, but now says the token is required and that it crosses the network
+  in plain HTTP. `doctor` reports the dashboard's bind and warns beyond
+  loopback.
+- **Added — tests:** 18 new (222 total). The escaping tests lift the page's
+  real `innerHTML` expressions out of the served HTML and run them, then check
+  the produced markup for injected tags — a template that merely says `esc()`
+  is not proof. Green against both `mcp<2` and `mcp>=2`.
+
 ## v8.5
 
 A hardening release, from an audit of the whole project against HashiCorp Vault

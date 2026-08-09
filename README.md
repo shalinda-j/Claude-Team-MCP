@@ -301,6 +301,8 @@ All settings are environment variables, set when you register the server.
 | `GATEWAY_MAX_OPS` | `150` | Max operations generated from one OpenAPI spec. |
 | `GATEWAY_ALLOW_PRIVATE` | unset | Set to `1` to let the hub reach private/loopback/link-local addresses (see [SSRF guard](#ssrf-guard)). |
 | `GATEWAY_ALLOWED_HOSTS` | unset | Comma-separated allowlist; when set, the hub reaches only these hosts and their subdomains. |
+| `TEAM_OPERATOR_TOKEN` | unset | Required to register targets or write vault keys (see [operator gate](#operator-gate-and-credential-binding)). |
+| `DASHBOARD_TOKEN` | random per run | Token the dashboard requires; set it to keep one URL across restarts. |
 
 ## How it works
 
@@ -325,6 +327,40 @@ writable, the vault's file permissions, and the SSRF guard's current mode —
 each with the fix attached. It exits non-zero if anything is broken, so it can
 be dropped into a setup script. `doctor` is also available as an MCP tool, so
 an agent can diagnose its own environment.
+
+## Dashboard access
+
+> **Breaking in v8.6.** The dashboard now requires a token. Open the whole URL
+> that `start_dashboard` prints — it carries `?t=<token>`.
+
+The dashboard serves the full channel, the task board, security findings, and
+the gateway's vault key names. It used to serve all of that to anyone who could
+reach the port, and answered the JSON endpoints with
+`Access-Control-Allow-Origin: *` — so binding to `127.0.0.1` bought nothing:
+any page open in your browser could `fetch('http://127.0.0.1:8765/api/state')`
+cross-origin and read the lot.
+
+`start_dashboard` now mints a random token per run and returns it in the URL:
+
+```
+Dashboard live at http://localhost:8765/?t=Xk3f… — open that whole URL
+```
+
+The token can also be sent as an `X-Dashboard-Token` header. Set
+`DASHBOARD_TOKEN` in the environment to keep one URL across restarts. The
+wildcard CORS header is gone, responses carry `no-store`, `nosniff`,
+`X-Frame-Options: DENY` and a CSP whose `connect-src 'self'` means an injected
+payload has nowhere to send what it reads, and unknown paths 404 instead of
+returning the dashboard.
+
+Output escaping was tightened at the same time: `role`, `assignee`, and
+`judge_role` reached `innerHTML` unescaped, and `esc()` did not escape quotes,
+so any escaped value sitting in an attribute was still injectable. Both are
+fixed, and the tests render the page's real expressions to check the produced
+markup rather than trusting that the template says `esc()`.
+
+Binding to `0.0.0.0` still works for LAN viewing, but it is plain HTTP — the
+token crosses the network in the clear, so only do it on a network you trust.
 
 ## Operator gate and credential binding
 
