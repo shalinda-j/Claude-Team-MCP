@@ -3002,6 +3002,7 @@ def reset_team(keep_memory: bool = False) -> str:
 # full MCP adapter from an OpenAPI/Swagger spec.
 # ============================================================================
 
+import ast as _ast
 import asyncio as _asyncio
 import base64 as _b64
 import collections as _collections
@@ -4146,6 +4147,19 @@ def gateway_call_tool(target: str, tool: str, arguments: str = "", agent: str = 
 # KILLER FEATURE -- Auto-Adapter Generator (OpenAPI/Swagger -> MCP server)
 # ============================================================================
 
+def _gw_docsafe(s: str) -> str:
+    """Make spec text safe to sit inside a generated triple-quoted docstring.
+
+    Everything here comes from a spec that is usually fetched over the network,
+    so the author of that spec is writing into a Python file on someone's disk.
+    A docstring can be escaped three ways -- close it with \"\"\", break the line
+    to reach code position, or end on a backslash so the closing quotes are
+    themselves escaped -- and all three are handled. Values that land in *code*
+    rather than a docstring go through repr() instead; never through here.
+    """
+    return " ".join(str(s or "").split())[:280].replace('"""', "'''").rstrip("\\")
+
+
 def _gw_py_ident(s: str) -> str:
     s = _re.sub(r"[^0-9a-zA-Z_]", "_", str(s or "")).strip("_")
     if not s:
@@ -4262,12 +4276,22 @@ def _gw_gen_tool(op: dict, used: set) -> str:
     sig = [f'{py}: str = ""' for _, _, py in pmap]
     if op["has_body"]:
         sig.append('body: str = ""')
-    doc = " ".join((op["summary"] or "").split())[:280].replace('"""', "'''").rstrip("\\")
+    doc = _gw_docsafe(op["summary"])
+    # op["path"] is a JSON object key from the spec and can contain quotes and
+    # newlines. It used to go into the docstring raw, right after the hardened
+    # summary -- walking straight through the back door of the field that was
+    # protected.
+    doc_path = _gw_docsafe(f'{op["method"].upper()} {op["path"]}')
     L = ["@mcp.tool()", f"def {name}({', '.join(sig)}) -> str:", f'    """{doc}', "",
-         f'    {op["method"].upper()} {op["path"]}', '    """', f'    _p = {op["path"]!r}']
+         f'    {doc_path}', '    """', f'    _p = {op["path"]!r}']
     for loc, orig, py in pmap:
         if loc == "path":
-            L.append(f'    _p = _p.replace("{{{orig}}}", _url.quote(str({py})))')
+            # repr the whole placeholder. The query and header branches below
+            # already used !r; only this one built a double-quoted literal by
+            # hand, so a parameter named `id"); evil(); ("` closed it and landed
+            # a call in the generated file.
+            placeholder = "{" + str(orig) + "}"
+            L.append(f'    _p = _p.replace({placeholder!r}, _url.quote(str({py})))')
     L.append("    _q = {}")
     for loc, orig, py in pmap:
         if loc == "query":
@@ -4301,14 +4325,17 @@ import urllib.request as _req
 import urllib.error as _err
 import urllib.parse as _url
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ImportError:  # mcp >= 2.0 renamed it
+    from mcp.server.mcpserver import MCPServer as FastMCP
 
-mcp = FastMCP("__NAME__")
+mcp = FastMCP(__NAME_LIT__)
 
-BASE_URL = os.environ.get("__PREFIX___BASE_URL", "__BASE_URL__").rstrip("/")
-API_KEY = os.environ.get("__PREFIX___API_KEY", "")
-AUTH_TYPE = "__AUTH_TYPE__"
-AUTH_NAME = "__AUTH_NAME__"
+BASE_URL = os.environ.get(__BASE_ENV__, __BASE_URL__).rstrip("/")
+API_KEY = os.environ.get(__KEY_ENV__, "")
+AUTH_TYPE = __AUTH_TYPE__
+AUTH_NAME = __AUTH_NAME__
 
 
 def _request(method, path, query=None, body="", headers=None):
@@ -4342,10 +4369,29 @@ __TOOLS__
 if __name__ == "__main__":
     mcp.run()
 '''
-    return (tmpl.replace("__NAME__", name).replace("__COUNT__", str(len(ops)))
-                .replace("__PREFIX__", prefix).replace("__BASE_URL__", base_url or "")
-                .replace("__AUTH_TYPE__", auth_type or "none").replace("__AUTH_NAME__", auth_name or "")
+    # Spec-derived values reach *code* positions only as repr(), so a value
+    # containing a quote produces an escaped literal instead of closing one and
+    # landing a call. The remaining __NAME__/__PREFIX__/__FILE__ substitutions
+    # sit in docstring text and are already restricted to [0-9A-Za-z_] by
+    # _gw_py_ident and the prefix regex.
+    code = (tmpl.replace("__NAME_LIT__", repr(name))
+                .replace("__BASE_ENV__", repr(prefix + "_BASE_URL"))
+                .replace("__KEY_ENV__", repr(prefix + "_API_KEY"))
+                .replace("__BASE_URL__", repr(base_url or ""))
+                .replace("__AUTH_TYPE__", repr(auth_type or "none"))
+                .replace("__AUTH_NAME__", repr(auth_name or ""))
+                .replace("__NAME__", name).replace("__COUNT__", str(len(ops)))
+                .replace("__PREFIX__", prefix)
                 .replace("__FILE__", name + ".py").replace("__TOOLS__", tools_src))
+    # Last line of defence: refuse to write a file that will not even parse.
+    # This does not prove the code is safe -- repr() does that -- but it turns
+    # any future interpolation mistake into an error here instead of a broken
+    # or hostile .py on the user's disk.
+    try:
+        _ast.parse(code)
+    except SyntaxError as e:
+        raise ValueError(f"refusing to write adapter: generated code does not parse ({e})")
+    return code
 
 
 @mcp.tool()
@@ -4393,7 +4439,10 @@ def gateway_generate_adapter(spec: str, name: str = "", out_path: str = "",
     if len(ops) > GATEWAY_MAX_OPS:
         truncated = f" (capped at {GATEWAY_MAX_OPS} of {len(ops)} ops; raise GATEWAY_MAX_OPS)"
         ops = ops[:GATEWAY_MAX_OPS]
-    code = _gw_gen_adapter_code(adapter_name, burl, ops, auth_type, auth_name)
+    try:
+        code = _gw_gen_adapter_code(adapter_name, burl, ops, auth_type, auth_name)
+    except ValueError as e:
+        return f"Could not generate adapter: {e}"
     # Keep the write inside ADAPTER_DIR. out_path was unconstrained: an absolute
     # path or a `..` walk let this land on a sitecustomize.py, an adapter the
     # operator already trusts, or the hub's own files -- and the content is

@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented here.
 
+## v8.7
+
+- **Fixed — the adapter generator let a spec write code, not just data.**
+  `gateway_generate_adapter` builds a Python file by concatenating spec-derived
+  strings into source, and `_gw_load_spec` fetches specs over HTTPS — so "wrap
+  `https://vendor.example/openapi.json`" meant whoever served that URL chose
+  part of a `.py` file on your disk. A value containing a quote closed the
+  literal it landed in and opened a fresh statement. Five sinks: the spec's
+  `servers[0].url`, a Swagger 2 `host`+`basePath`, the `base_url` argument, a
+  `securitySchemes[*].name`, and a path-parameter name (query and header
+  parameters already used `repr()`; only the path branch built its literal by
+  hand). A sixth, a `paths` key, reached the docstring beside the hardened
+  `summary` with none of its treatment. Everything reaching a code position now
+  goes through `repr()`, everything reaching a docstring through a single
+  `_gw_docsafe()`, and the generated module is parsed before it is written so a
+  future slip fails loudly instead of landing a broken or hostile file.
+- **Fixed — every generated adapter was dead on `mcp` 2.x.** The template
+  hardcoded `from mcp.server.fastmcp import FastMCP`. v8.3 taught the server to
+  survive that rename and never touched the file it writes; the suite passed
+  throughout because nothing had ever executed the output. The template now
+  uses the same shim, and a test loads a generated adapter and lists its tools.
+- **Added — tests:** 20 new (242 total). They assert on the parsed AST rather
+  than on substrings, since an escaped payload still contains its own text —
+  only the tree distinguishes inert data from a live call. Verified meaningful
+  by running the same vectors against the previous release, where four of them
+  land a call and a fifth writes a file that will not parse. Green against both
+  `mcp<2` and `mcp>=2`.
+
 ## v8.6
 
 Dashboard hardening, continuing the audit against HashiCorp Vault.

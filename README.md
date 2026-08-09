@@ -413,9 +413,12 @@ A target not on the list is refused at call time, and the refusal is audited.
 loud. Keys stored before this existed keep working; `doctor` lists them so you
 can bind them deliberately rather than leaving them open by accident.
 
-`gateway_generate_adapter` also writes only inside `ADAPTER_DIR` now — `out_path`
-was unconstrained, and the file's contents come from a spec that is usually
-fetched over the network.
+`gateway_generate_adapter` also writes only inside `ADAPTER_DIR` — `out_path`
+was unconstrained — and every spec-derived value reaches the generated file as
+a `repr()` literal or through the docstring sanitiser, never as raw source. The
+generated module is parsed before it is written. Read a generated adapter
+before you run it regardless: it is code, and the spec's author had a hand in
+it.
 
 ## SSRF guard
 
