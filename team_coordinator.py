@@ -1820,8 +1820,10 @@ def network_info() -> str:
     if _dashboard_server is not None:
         port = _dashboard_server.server_address[1]
         out.append(f"Dashboard is LIVE on port {port}.")
-        out.append(f"To view from another device on your LAN, restart it bound to 0.0.0.0")
-        out.append(f"(set DASHBOARD_HOST=0.0.0.0) and browse http://<this-machine-ip>:{port}/")
+        out.append("To view from another device on your LAN, restart it bound to 0.0.0.0")
+        out.append(f"(set DASHBOARD_HOST=0.0.0.0) and browse http://<this-machine-ip>:{port}/?t=<token>")
+        out.append("The token is required and is printed by start_dashboard. Over a LAN it")
+        out.append("travels in plain HTTP, so only do this on a network you trust.")
     else:
         out.append("Dashboard not running. Start it with start_dashboard.")
     return "\n".join(out)
@@ -2178,6 +2180,11 @@ def score_debate() -> str:
 
 DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "8765"))
 DASHBOARD_HOST = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
+# Set one to keep a stable URL across restarts; otherwise start_dashboard mints
+# a fresh random token each time and puts it in the URL it prints.
+import secrets as _secrets
+
+DASHBOARD_TOKEN = os.environ.get("DASHBOARD_TOKEN", "").strip()
 _dashboard_thread = None
 _dashboard_server = None
 
@@ -2323,7 +2330,7 @@ h1{font-size:18px;margin-bottom:4px}
 .bar>div{height:100%;background:var(--green)}
 .full{grid-column:1/-1}
 </style></head><body>
-<h1>🤖 Team Dashboard <a href="/gateway" style="font-size:13px;color:#58a6ff;text-decoration:none">Gateway →</a></h1>
+<h1>🤖 Team Dashboard <a id="navgw" href="/gateway" style="font-size:13px;color:#58a6ff;text-decoration:none">Gateway →</a></h1>
 <div class="sub" id="updated">connecting…</div>
 <div class="grid">
   <div class="card full"><h2>Metrics</h2><div class="metrics" id="metrics"></div><div class="bar"><div id="progbar" style="width:0%"></div></div></div>
@@ -2339,24 +2346,24 @@ h1{font-size:18px;margin-bottom:4px}
 </div>
 <script>
 const E=id=>document.getElementById(id);
-function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function esc(s){return String(s??'').replace(/[&<>"'`]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}[c]));}
 function men(s){return esc(s).replace(/@(\\w+)/g,'<span class="mention">@$1</span>');}
 async function tick(){
  try{
-  const r=await fetch('/api/state'); const d=await r.json();
+  const r=await fetch('/api/state'+location.search); const d=await r.json();
   const m=d.metrics;
   E('metrics').innerHTML=[['agents_online','Online'],['messages','Messages'],['tasks_total','Tasks'],['tasks_done','Done'],['tasks_in_progress','Doing'],['decisions','Decisions']]
     .map(([k,l])=>`<div class="metric"><div class="n">${m[k]}</div><div class="l">${l}</div></div>`).join('');
   E('progbar').style.width=(m.tasks_total?Math.round(100*m.tasks_done/m.tasks_total):0)+'%';
-  E('agents').innerHTML=Object.values(d.agents).map(a=>`<div class="agent"><span class="dot ${a.status||'online'}"></span>${esc(a.name)} <span class="pill">${a.role}</span> <span class="pill">${a.status||'online'}</span></div>`).join('')||'<div class="agent">none</div>';
-  E('tasks').innerHTML=d.tasks.map(t=>{const c={done:'s-done',in_progress:'s-progress',blocked:'s-blocked',todo:'s-todo'}[t.status]||'s-todo';const sub=t.parent_id?'&nbsp;&nbsp;↳ ':'';return `<div class="task">${sub}<span class="${c}">●</span> #${t.id} ${esc(t.title)} <span class="pill">${t.assignee||'—'}</span> <span class="pill">${t.priority||'med'}</span></div>`;}).join('')||'<div class="task">none</div>';
+  E('agents').innerHTML=Object.values(d.agents).map(a=>`<div class="agent"><span class="dot ${esc(a.status||'online')}"></span>${esc(a.name)} <span class="pill">${esc(a.role)}</span> <span class="pill">${esc(a.status||'online')}</span></div>`).join('')||'<div class="agent">none</div>';
+  E('tasks').innerHTML=d.tasks.map(t=>{const c={done:'s-done',in_progress:'s-progress',blocked:'s-blocked',todo:'s-todo'}[t.status]||'s-todo';const sub=t.parent_id?'&nbsp;&nbsp;↳ ':'';return `<div class="task">${sub}<span class="${c}">●</span> #${t.id} ${esc(t.title)} <span class="pill">${esc(t.assignee||'—')}</span> <span class="pill">${esc(t.priority||'med')}</span></div>`;}).join('')||'<div class="task">none</div>';
   E('messages').innerHTML=d.messages.slice(-40).map(x=>`<div class="msg"><span class="who">${esc(x.from)}</span>: ${men(x.text)}</div>`).reverse().join('')||'<div class="msg">none</div>';
-  if(d.debate){const dd=d.debate;E('debate').innerHTML=`<b>${esc(dd.topic)}</b><br><span class="pill">${dd.phase}</span> <span class="pill">round ${dd.round+1}/${dd.max_rounds}</span> <span class="pill">judge ${dd.judge_role}</span>`+ (dd.verdict?`<br><br>✅ <b>${esc(dd.verdict.decision)}</b>`:'');}else{E('debate').innerHTML='<span class="s-todo">No active debate</span>';}
+  if(d.debate){const dd=d.debate;E('debate').innerHTML=`<b>${esc(dd.topic)}</b><br><span class="pill">${esc(dd.phase)}</span> <span class="pill">round ${esc(dd.round+1)}/${esc(dd.max_rounds)}</span> <span class="pill">judge ${esc(dd.judge_role)}</span>`+ (dd.verdict?`<br><br>✅ <b>${esc(dd.verdict.decision)}</b>`:'');}else{E('debate').innerHTML='<span class="s-todo">No active debate</span>';}
   E('timeline').innerHTML=d.timeline.slice(-25).map(e=>`<div class="ev"><span class="s-todo">${e.time.split(' ')[1]||e.time}</span> ${esc(e.who)}: ${esc(e.action)}</div>`).reverse().join('')||'<div class="ev">none</div>';
   const F=d.findings||[],closed=['fixed','verified','false_positive','wont_fix'];
   const sev={critical:0,high:0,medium:0,low:0,info:0};F.forEach(f=>{if(sev[f.severity]!==undefined)sev[f.severity]++;});
   const openF=F.filter(f=>!closed.includes(f.status)).length;
-  E('findings').innerHTML=F.length?`<div class="row sub">${F.length} total · ${openF} open · <span class="sev-critical">${sev.critical}C</span> <span class="sev-high">${sev.high}H</span> <span class="sev-medium">${sev.medium}M</span> <span class="sev-low">${sev.low}L</span></div>`+F.slice(-12).reverse().map(f=>`<div class="row"><span class="sev-${f.severity}">●</span> #${f.id} ${esc(f.title)} <span class="pill">${f.status}</span> ${f.location?'<span class="sub">'+esc(f.location)+'</span>':''}</div>`).join(''):'<div class="row sub">no findings — clean ✓</div>';
+  E('findings').innerHTML=F.length?`<div class="row sub">${F.length} total · ${openF} open · <span class="sev-critical">${sev.critical}C</span> <span class="sev-high">${sev.high}H</span> <span class="sev-medium">${sev.medium}M</span> <span class="sev-low">${sev.low}L</span></div>`+F.slice(-12).reverse().map(f=>`<div class="row"><span class="sev-${esc(f.severity)}">●</span> #${f.id} ${esc(f.title)} <span class="pill">${esc(f.status)}</span> ${f.location?'<span class="sub">'+esc(f.location)+'</span>':''}</div>`).join(''):'<div class="row sub">no findings — clean ✓</div>';
   const M=d.memory||{};
   E('memory').innerHTML=`<div class="metrics">`+[['notes','Notes'],['facts','Facts'],['summaries','Summaries'],['brain','Brain']].map(([k,l])=>`<div class="metric"><div class="n">${M[k]||0}</div><div class="l">${l}</div></div>`).join('')+`</div>`;
   const R=d.reliability||{},ag=Object.values(d.agents),up=ag.filter(a=>['online','idle','busy'].includes(a.status||'online')).length,rc=Object.entries(R.receipts||{});
@@ -2366,15 +2373,67 @@ async function tick(){
   E('updated').textContent='live · updated '+new Date().toLocaleTimeString();
  }catch(e){E('updated').textContent='disconnected — retrying…';}
 }
+{const n=document.getElementById('navgw')||document.getElementById('navteam');if(n)n.href+=location.search;}
 tick();setInterval(tick,2000);
 </script></body></html>"""
 
 
 class _DashHandler(BaseHTTPRequestHandler):
+    # Don't advertise the exact Python patch version.
+    server_version = "claude-team-mcp"
+    sys_version = ""
+
     def log_message(self, *a):
         pass  # silence
 
+    def _authed(self) -> bool:
+        """Every response needs the dashboard token.
+
+        The old handler had no authentication and answered the JSON endpoints
+        with Access-Control-Allow-Origin: *, so binding to 127.0.0.1 bought
+        nothing: any page open in the user's browser could fetch /api/state and
+        /api/gateway cross-origin and read the whole channel, the security
+        findings, and the vault key names. The wildcard is gone and a token is
+        required, which also covers DNS rebinding -- an attacker's page can
+        reach the port but cannot produce the token.
+        """
+        if not DASHBOARD_TOKEN:
+            return False
+        supplied = _urlparse.parse_qs(_urlparse.urlparse(self.path).query).get("t", [""])[0]
+        if not supplied:
+            supplied = self.headers.get("X-Dashboard-Token", "")
+        return _hmac.compare_digest(supplied, DASHBOARD_TOKEN)
+
+    def _send(self, body: bytes, content_type: str, status: int = 200):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        # The payload carries channel history, findings and vault key names --
+        # it should not sit in a disk cache or be framed by another page. The
+        # CSP cannot forbid inline script (the page is one self-contained file),
+        # but connect-src 'self' means an injected payload has nowhere to send
+        # what it reads.
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'none'; style-src 'unsafe-inline'; "
+                         "script-src 'unsafe-inline'; connect-src 'self'; "
+                         "frame-ancestors 'none'")
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
+        route = _urlparse.urlparse(self.path).path.rstrip("/") or "/"
+        if not self._authed():
+            hint = ("Dashboard token required. Open the URL that start_dashboard printed, "
+                    "which carries ?t=<token>, or send an X-Dashboard-Token header.")
+            self._send(hint.encode("utf-8"), "text/plain; charset=utf-8", 401)
+            return
+        if route not in ("/", "/gateway", "/api/state", "/api/gateway"):
+            self._send(b"Not found", "text/plain; charset=utf-8", 404)
+            return
         if self.path.startswith("/api/state"):
             state = _read_state_unlocked()
             try:
@@ -2408,35 +2467,13 @@ class _DashHandler(BaseHTTPRequestHandler):
                     "votes": debate.get("votes", {}),
                 },
             }
-            body = json.dumps(payload).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send(json.dumps(payload).encode("utf-8"), "application/json")
         elif self.path.startswith("/api/gateway"):
-            body = json.dumps(_gw_dashboard_payload()).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        elif self.path.startswith("/gateway"):
-            body = _gateway_html().encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send(json.dumps(_gw_dashboard_payload()).encode("utf-8"), "application/json")
+        elif route == "/gateway":
+            self._send(_gateway_html().encode("utf-8"), "text/html; charset=utf-8")
         else:
-            body = _dashboard_html().encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send(_dashboard_html().encode("utf-8"), "text/html; charset=utf-8")
 
 
 @mcp.tool()
@@ -2447,18 +2484,24 @@ def start_dashboard(port: int = 0) -> str:
     Args:
         port: Port to serve on (0 = use DASHBOARD_PORT, default 8765).
     """
-    global _dashboard_thread, _dashboard_server
+    global _dashboard_thread, _dashboard_server, DASHBOARD_TOKEN
     if _dashboard_server is not None:
-        return f"Dashboard already running at http://localhost:{_dashboard_server.server_address[1]}/"
+        return (f"Dashboard already running at "
+                f"http://localhost:{_dashboard_server.server_address[1]}/?t={DASHBOARD_TOKEN}")
     use_port = port or DASHBOARD_PORT
+    if not DASHBOARD_TOKEN:
+        # Mint one per run rather than shipping an unauthenticated port. The
+        # page serves channel history, security findings and vault key names.
+        DASHBOARD_TOKEN = _secrets.token_urlsafe(24)
     try:
         _dashboard_server = ThreadingHTTPServer((DASHBOARD_HOST, use_port), _DashHandler)
     except OSError as e:
         return f"Could not start dashboard on port {use_port}: {e}. Try a different port."
     _dashboard_thread = threading.Thread(target=_dashboard_server.serve_forever, daemon=True)
     _dashboard_thread.start()
-    return (f"Dashboard live at http://localhost:{use_port}/ — open it in your browser. "
-            f"It auto-refreshes every 2 seconds.")
+    return (f"Dashboard live at http://localhost:{use_port}/?t={DASHBOARD_TOKEN} — open that "
+            f"whole URL in your browser; the token is what lets it read. It auto-refreshes "
+            f"every 2 seconds. Set DASHBOARD_TOKEN to keep the URL stable across restarts.")
 
 
 @mcp.tool()
@@ -4443,7 +4486,7 @@ a{color:var(--accent);text-decoration:none}
 .full{grid-column:1/-1}.ok{color:var(--green)}.err{color:var(--red)}
 code{color:var(--amber)}
 </style></head><body>
-<h1>🛰️ MCP Hub / Gateway <a href="/" style="font-size:13px">&larr; Team Dashboard</a></h1>
+<h1>🛰️ MCP Hub / Gateway <a id="navteam" href="/" style="font-size:13px">&larr; Team Dashboard</a></h1>
 <div class="sub" id="updated">connecting...</div>
 <div class="grid">
   <div class="card full"><h2>Targets</h2><div id="targets"></div></div>
@@ -4454,18 +4497,19 @@ code{color:var(--amber)}
 </div>
 <script>
 const E=id=>document.getElementById(id);
-function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function esc(s){return String(s??'').replace(/[&<>"'`]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;'}[c]));}
 async function tick(){
  try{
-  const r=await fetch('/api/gateway'); const d=await r.json();
-  E('targets').innerHTML=Object.entries(d.targets).map(([n,t])=>`<div class="row"><span class="${t.kind}">●</span> <b>${esc(n)}</b> <span class="pill">${t.kind}</span> ${t.enabled?'':'<span class="pill">disabled</span>'} <span class="pill">${t.capabilities||t.operations||0} ops</span><br><span class="sub">${esc(t.base_url||t.command||'')} ${(t.tags||[]).map(x=>'#'+esc(x)).join(' ')}</span></div>`).join('')||'<div class="row">none -- register a target</div>';
-  E('routes').innerHTML=(d.routes||[]).slice().sort((a,b)=>(b.priority||0)-(a.priority||0)).map(r=>`<div class="row"><code>${esc(r.pattern)}</code> → ${esc(r.target)} <span class="pill">p${r.priority||0}</span></div>`).join('')||'<div class="row">none</div>';
+  const r=await fetch('/api/gateway'+location.search); const d=await r.json();
+  E('targets').innerHTML=Object.entries(d.targets).map(([n,t])=>`<div class="row"><span class="${esc(t.kind)}">●</span> <b>${esc(n)}</b> <span class="pill">${esc(t.kind)}</span> ${t.enabled?'':'<span class="pill">disabled</span>'} <span class="pill">${esc(t.capabilities||t.operations||0)} ops</span><br><span class="sub">${esc(t.base_url||t.command||'')} ${(t.tags||[]).map(x=>'#'+esc(x)).join(' ')}</span></div>`).join('')||'<div class="row">none -- register a target</div>';
+  E('routes').innerHTML=(d.routes||[]).slice().sort((a,b)=>(b.priority||0)-(a.priority||0)).map(r=>`<div class="row"><code>${esc(r.pattern)}</code> → ${esc(r.target)} <span class="pill">p${esc(r.priority||0)}</span></div>`).join('')||'<div class="row">none</div>';
   E('usage').innerHTML=`<div class="row sub">default ${d.default_limit}/min</div>`+Object.entries(d.stats||{}).map(([n,s])=>`<div class="row">${esc(n)}: ${s.calls||0} calls, <span class="${s.errors?'err':'ok'}">${s.errors||0} err</span></div>`).join('');
   E('creds').innerHTML=(d.credentials||[]).map(k=>`<div class="row">🔑 ${esc(k)} <span class="sub">(hidden)</span></div>`).join('')||'<div class="row">empty</div>';
   E('audit').innerHTML=(d.audit||[]).slice(-80).map(a=>`<div class="row"><span class="sub">${esc((a.time||'').split(' ')[1]||a.time)}</span> ${esc(a.agent)} → ${esc(a.target)} ${esc(a.op)} <span class="${a.ok===false?'err':'ok'}">[${esc(a.status)}]</span> ${a.ms?a.ms+'ms':''}</div>`).reverse().join('')||'<div class="row">no activity</div>';
   E('updated').textContent='live - '+new Date().toLocaleTimeString();
  }catch(e){E('updated').textContent='disconnected -- retrying...';}
 }
+{const n=document.getElementById('navgw')||document.getElementById('navteam');if(n)n.href+=location.search;}
 tick();setInterval(tick,2000);
 </script></body></html>"""
 
@@ -4557,6 +4601,14 @@ def _doctor_rows() -> list:
         rows.append((_OK, "Vault keys", f"{len(_vault_load())} stored (values never shown)"))
     else:
         rows.append((_OK, "Vault", "no credentials stored yet"))
+
+    # --- dashboard ---
+    if _dashboard_server is not None:
+        where = "127.0.0.1 only" if DASHBOARD_HOST == "127.0.0.1" else DASHBOARD_HOST
+        status = _WARN if DASHBOARD_HOST not in ("127.0.0.1", "localhost") else _OK
+        rows.append((status, "Dashboard", f"live on {where}:{_dashboard_server.server_address[1]}, "
+                                          f"token required" +
+                     ("" if status == _OK else " — bound beyond loopback, and it is plain HTTP")))
 
     # --- operator gate + credential bindings ---
     if OPERATOR_TOKEN:
