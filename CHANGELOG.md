@@ -31,6 +31,13 @@ All notable changes to this project are documented here.
   `http.extraheader`, checks out with `persist-credentials: false`, and fails
   with a clear message when `GITLAB_MIRROR_URL` is set but the token secret is
   not.
+- **Fixed — the workflows pinned actions whose runtime is being retired.**
+  `actions/checkout@v4` and `actions/setup-python@v5` target Node.js 20, which
+  GitHub deprecated; runners were already force-running them on Node 24 and
+  warning about it. Both are on `@v7`. This is the same shape as the `mcp`
+  1.x -> 2.x break that started this series — a dependency retiring underneath
+  a pipeline nobody re-runs — and the weekly scheduled build exists to surface
+  exactly that.
 - **Changed — the GitLab pipeline caught up with GitHub.** It gained the two
   `mcp` SDK legs and the `doctor` step it was documented as lacking, plus the
   container job, `interruptible: true`, explicit timeouts, and one YAML anchor
