@@ -2,6 +2,76 @@
 
 All notable changes to this project are documented here.
 
+## v8.8
+
+- **Added — container image.** `Dockerfile`, `.dockerignore` and
+  `docker-compose.yml`. The server is stdio, so a client attaches to the
+  container (`docker run --rm -i`); a TTY would corrupt the JSON-RPC stream, so
+  compose sets `stdin_open` without `tty`. Everything stateful lives under
+  `/data` as a single volume, the image runs as an unprivileged user (the hub
+  spawns processes an operator registers — it should not do that as root), tini
+  reaps those children and forwards signals, and the healthcheck is
+  `claude-team-mcp doctor`, which already exits non-zero on a broken
+  environment. Compose also has a `dashboard` profile that publishes to the
+  host's loopback only.
+- **Added — the image is tested, not just built.** Both pipelines build it and
+  then run `doctor` inside it, assert the container is not root, prove state
+  written by one container is visible to the next through the volume, and pipe
+  an `initialize` request through `docker run -i` to confirm the handshake
+  replies.
+- **Fixed — workflows ran with more privilege and less bounding than they
+  needed.** Neither had a `permissions:` block, so both inherited the
+  repository default; both are now `contents: read`. Neither had
+  `concurrency:`, so pushing twice ran two full matrices; CI now cancels
+  superseded runs on branches but never on `main`, and the mirror queues rather
+  than racing two force-pushes at the same ref. No job had a
+  `timeout-minutes`, so a hung one would have burned the six-hour default.
+- **Fixed — the mirror put a token in `argv`.** `git push` with credentials
+  inline is visible to any other process on the runner; it now goes through
+  `http.extraheader`, checks out with `persist-credentials: false`, and fails
+  with a clear message when `GITLAB_MIRROR_URL` is set but the token secret is
+  not.
+- **Fixed — the workflows pinned actions whose runtime is being retired.**
+  `actions/checkout@v4` and `actions/setup-python@v5` target Node.js 20, which
+  GitHub deprecated; runners were already force-running them on Node 24 and
+  warning about it. Both are on `@v7`. This is the same shape as the `mcp`
+  1.x -> 2.x break that started this series — a dependency retiring underneath
+  a pipeline nobody re-runs — and the weekly scheduled build exists to surface
+  exactly that.
+- **Changed — the GitLab pipeline caught up with GitHub.** It gained the two
+  `mcp` SDK legs and the `doctor` step it was documented as lacking, plus the
+  container job, `interruptible: true`, explicit timeouts, and one YAML anchor
+  for the trigger rules that were copy-pasted onto every job. `pip install -e
+  .[dev]` is quoted, since `[dev]` is a glob to `sh`.
+
+## v8.7
+
+- **Fixed — the adapter generator let a spec write code, not just data.**
+  `gateway_generate_adapter` builds a Python file by concatenating spec-derived
+  strings into source, and `_gw_load_spec` fetches specs over HTTPS — so "wrap
+  `https://vendor.example/openapi.json`" meant whoever served that URL chose
+  part of a `.py` file on your disk. A value containing a quote closed the
+  literal it landed in and opened a fresh statement. Five sinks: the spec's
+  `servers[0].url`, a Swagger 2 `host`+`basePath`, the `base_url` argument, a
+  `securitySchemes[*].name`, and a path-parameter name (query and header
+  parameters already used `repr()`; only the path branch built its literal by
+  hand). A sixth, a `paths` key, reached the docstring beside the hardened
+  `summary` with none of its treatment. Everything reaching a code position now
+  goes through `repr()`, everything reaching a docstring through a single
+  `_gw_docsafe()`, and the generated module is parsed before it is written so a
+  future slip fails loudly instead of landing a broken or hostile file.
+- **Fixed — every generated adapter was dead on `mcp` 2.x.** The template
+  hardcoded `from mcp.server.fastmcp import FastMCP`. v8.3 taught the server to
+  survive that rename and never touched the file it writes; the suite passed
+  throughout because nothing had ever executed the output. The template now
+  uses the same shim, and a test loads a generated adapter and lists its tools.
+- **Added — tests:** 20 new (242 total). They assert on the parsed AST rather
+  than on substrings, since an escaped payload still contains its own text —
+  only the tree distinguishes inert data from a live call. Verified meaningful
+  by running the same vectors against the previous release, where four of them
+  land a call and a fifth writes a file that will not parse. Green against both
+  `mcp<2` and `mcp>=2`.
+
 ## v8.6
 
 Dashboard hardening, continuing the audit against HashiCorp Vault.

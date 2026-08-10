@@ -12,10 +12,23 @@ on:
     # because nothing re-ran the suite in the meantime.
     - cron: "0 6 * * 1"
 
+# Least privilege. Without this block jobs inherit the repository default,
+# which on many repos is write-all -- more than a test run has any use for.
+permissions:
+  contents: read
+
+# A second push to a PR makes the first run's result irrelevant, so stop it
+# rather than letting two full matrices race. Never cancel on main: those runs
+# are the record of what that commit did.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
     name: pytest (py${{ matrix.python-version }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -29,9 +42,9 @@ jobs:
     env:
       PYTHONUTF8: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -52,6 +65,7 @@ jobs:
     # depending on whatever the resolver happens to pick that day.
     name: pytest (mcp ${{ matrix.mcp }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -59,8 +73,8 @@ jobs:
     env:
       PYTHONUTF8: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install with pinned mcp
@@ -76,9 +90,10 @@ jobs:
   package:
     name: build sdist/wheel
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Build distribution
@@ -89,3 +104,44 @@ jobs:
         run: |
           pip install dist/*.whl
           python -c "import team_coordinator; assert callable(team_coordinator.main)"
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build image
+        run: docker build -t claude-team-mcp:ci .
+
+      # doctor exits non-zero when the environment is wrong, so this proves the
+      # image is not merely built but actually functional: the package
+      # installed, the entry point resolves, and every path it writes to is
+      # writable as the non-root user.
+      - name: Self-check inside the container
+        run: docker run --rm claude-team-mcp:ci doctor
+
+      - name: State lands on the volume, not the layer
+        run: |
+          docker volume create ci-state
+          docker run --rm -v ci-state:/data claude-team-mcp:ci doctor
+          docker run --rm -v ci-state:/data --entrypoint python claude-team-mcp:ci \
+            -c "import team_coordinator as tc; tc.join_team('PM','Pat'); print('wrote', tc.STATE_FILE)"
+          # A second container must see what the first one wrote.
+          docker run --rm -v ci-state:/data --entrypoint python claude-team-mcp:ci \
+            -c "import team_coordinator as tc; a=tc._load()['agents']; assert 'PM' in a, a; print('state survived the container')"
+
+      - name: Runs as a non-root user
+        run: |
+          uid=$(docker run --rm --entrypoint id claude-team-mcp:ci -u)
+          test "$uid" != "0" || { echo "image runs as root"; exit 1; }
+          echo "uid=$uid"
+
+      - name: Speaks MCP on stdio
+        run: |
+          # An initialize request must get a JSON-RPC response back on stdout.
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            | timeout 30 docker run --rm -i claude-team-mcp:ci > out.json || true
+          grep -q '"jsonrpc"' out.json || { echo "no JSON-RPC response:"; cat out.json; exit 1; }
+          echo "handshake replied"

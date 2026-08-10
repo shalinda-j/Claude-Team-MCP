@@ -93,6 +93,26 @@ claude mcp add team -s user -- env TEAM_STATE_FILE=~/mcp/shared_state.json claud
 2. Install dependencies: `pip install mcp filelock`.
 3. Register the server with your client (see below). For multi-client setups, point every client at the **same** `TEAM_STATE_FILE`.
 
+### Docker
+
+```bash
+docker build -t claude-team-mcp .
+claude mcp add team -s user -- docker run --rm -i -v claude-team-state:/data claude-team-mcp
+```
+
+`-i` keeps stdin open for the MCP stream; do **not** add `-t`, since a TTY
+corrupts JSON-RPC. Everything stateful lives under `/data`, so the named volume
+is what makes the team survive `docker rm`. Pass `-e TEAM_OPERATOR_TOKEN=...` to
+enable hub registration. The image runs as an unprivileged user and its
+healthcheck is `claude-team-mcp doctor`.
+
+`docker-compose.yml` wires the same thing up, plus a `dashboard` profile that
+publishes the dashboard to the host's loopback only:
+
+```bash
+DASHBOARD_TOKEN=$(openssl rand -hex 16) docker compose --profile dashboard up
+```
+
 ### Claude Code
 
 ```bash
@@ -413,9 +433,12 @@ A target not on the list is refused at call time, and the refusal is audited.
 loud. Keys stored before this existed keep working; `doctor` lists them so you
 can bind them deliberately rather than leaving them open by accident.
 
-`gateway_generate_adapter` also writes only inside `ADAPTER_DIR` now — `out_path`
-was unconstrained, and the file's contents come from a spec that is usually
-fetched over the network.
+`gateway_generate_adapter` also writes only inside `ADAPTER_DIR` — `out_path`
+was unconstrained — and every spec-derived value reaches the generated file as
+a `repr()` literal or through the docstring sanitiser, never as raw source. The
+generated module is parsed before it is written. Read a generated adapter
+before you run it regardless: it is code, and the spec's author had a hand in
+it.
 
 ## SSRF guard
 
@@ -463,7 +486,9 @@ claude-team-mcp/
 ├── .github/workflows/
 │   ├── ci.yml              # CI: Linux + Windows, Python 3.10–3.13, both mcp SDK lines
 │   └── mirror-gitlab.yml   # optional: auto-mirror main to GitLab
-├── .gitlab-ci.yml          # GitLab CI/CD: same tests + package build
+├── .gitlab-ci.yml          # GitLab CI/CD: tests, SDK matrix, package, image
+├── Dockerfile              # container image (stdio MCP server, non-root)
+├── docker-compose.yml      # named state volume + optional dashboard profile
 ├── examples/               # ready-to-copy client configs + gateway quick-start
 │   ├── claude_code.md
 │   ├── cursor_mcp.json

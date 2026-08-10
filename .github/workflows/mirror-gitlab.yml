@@ -11,21 +11,44 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# This job reads the repo and pushes elsewhere; it needs nothing writable here.
+permissions:
+  contents: read
+
+# Two pushes in quick succession would otherwise race to force-push the same
+# ref. Queue instead, and never cancel a mirror midway.
+concurrency:
+  group: mirror-gitlab
+  cancel-in-progress: false
+
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: vars.GITLAB_MIRROR_URL != ''
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Push main and tags to GitLab
         env:
           GITLAB_MIRROR_URL: ${{ vars.GITLAB_MIRROR_URL }}
           GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
         run: |
-          git push --force "https://oauth2:${GITLAB_TOKEN}@${GITLAB_MIRROR_URL}" \
-            "refs/heads/main:refs/heads/main"
-          git push --force "https://oauth2:${GITLAB_TOKEN}@${GITLAB_MIRROR_URL}" \
-            --tags
+          set -euo pipefail
+          if [ -z "${GITLAB_TOKEN}" ]; then
+            echo "GITLAB_MIRROR_URL is set but the GITLAB_TOKEN secret is not." >&2
+            echo "See examples/gitlab_setup.md." >&2
+            exit 1
+          fi
+          # Keep the credential out of argv, where it would be visible to any
+          # other process on the runner and to anything that echoes a command.
+          git remote add gitlab "https://gitlab-ci-token@${GITLAB_MIRROR_URL}"
+          git config --local "http.https://${GITLAB_MIRROR_URL}.extraheader" \
+            "Authorization: Basic $(printf 'oauth2:%s' "${GITLAB_TOKEN}" | base64 -w0)"
+          # --force is deliberate: the GitLab side is a mirror, not somewhere
+          # work happens, so GitHub is always the source of truth.
+          git push --force gitlab "refs/heads/main:refs/heads/main"
+          git push --force gitlab --tags
