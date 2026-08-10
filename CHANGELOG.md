@@ -2,6 +2,41 @@
 
 All notable changes to this project are documented here.
 
+## v8.8
+
+- **Added — container image.** `Dockerfile`, `.dockerignore` and
+  `docker-compose.yml`. The server is stdio, so a client attaches to the
+  container (`docker run --rm -i`); a TTY would corrupt the JSON-RPC stream, so
+  compose sets `stdin_open` without `tty`. Everything stateful lives under
+  `/data` as a single volume, the image runs as an unprivileged user (the hub
+  spawns processes an operator registers — it should not do that as root), tini
+  reaps those children and forwards signals, and the healthcheck is
+  `claude-team-mcp doctor`, which already exits non-zero on a broken
+  environment. Compose also has a `dashboard` profile that publishes to the
+  host's loopback only.
+- **Added — the image is tested, not just built.** Both pipelines build it and
+  then run `doctor` inside it, assert the container is not root, prove state
+  written by one container is visible to the next through the volume, and pipe
+  an `initialize` request through `docker run -i` to confirm the handshake
+  replies.
+- **Fixed — workflows ran with more privilege and less bounding than they
+  needed.** Neither had a `permissions:` block, so both inherited the
+  repository default; both are now `contents: read`. Neither had
+  `concurrency:`, so pushing twice ran two full matrices; CI now cancels
+  superseded runs on branches but never on `main`, and the mirror queues rather
+  than racing two force-pushes at the same ref. No job had a
+  `timeout-minutes`, so a hung one would have burned the six-hour default.
+- **Fixed — the mirror put a token in `argv`.** `git push` with credentials
+  inline is visible to any other process on the runner; it now goes through
+  `http.extraheader`, checks out with `persist-credentials: false`, and fails
+  with a clear message when `GITLAB_MIRROR_URL` is set but the token secret is
+  not.
+- **Changed — the GitLab pipeline caught up with GitHub.** It gained the two
+  `mcp` SDK legs and the `doctor` step it was documented as lacking, plus the
+  container job, `interruptible: true`, explicit timeouts, and one YAML anchor
+  for the trigger rules that were copy-pasted onto every job. `pip install -e
+  .[dev]` is quoted, since `[dev]` is a glob to `sh`.
+
 ## v8.7
 
 - **Fixed — the adapter generator let a spec write code, not just data.**

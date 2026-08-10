@@ -1,0 +1,52 @@
+# Convenience wrapper: a named volume for state, plus an optional dashboard.
+#
+# The MCP server itself is stdio, so it is not a long-running service you
+# `up -d` — a client starts it. Use this to build the image and to hold the
+# volume, and run the server with:
+#
+#   docker compose run --rm -i team
+#
+# The dashboard IS a server, so it gets its own profile:
+#
+#   DASHBOARD_TOKEN=$(openssl rand -hex 16) docker compose --profile dashboard up
+#   # then open http://localhost:8765/?t=$DASHBOARD_TOKEN
+
+services:
+  team:
+    build: .
+    image: claude-team-mcp
+    # stdio transport: stdin must stay open, and a TTY would corrupt the
+    # JSON-RPC stream, so stdin_open without tty.
+    stdin_open: true
+    tty: false
+    volumes:
+      - team-state:/data
+    environment:
+      # Registering hub targets and writing vault keys need this. Unset means
+      # those tools stay closed; see the README's operator gate section.
+      TEAM_OPERATOR_TOKEN: ${TEAM_OPERATOR_TOKEN:-}
+
+  dashboard:
+    build: .
+    image: claude-team-mcp
+    profiles: ["dashboard"]
+    # Shares the volume with `team`, so it renders the same world.
+    volumes:
+      - team-state:/data
+    environment:
+      # Bound to 0.0.0.0 *inside* the container; the port mapping below only
+      # publishes it to the host's loopback. The token is still required.
+      DASHBOARD_HOST: 0.0.0.0
+      DASHBOARD_PORT: "8765"
+      DASHBOARD_TOKEN: ${DASHBOARD_TOKEN:?set DASHBOARD_TOKEN, e.g. $(openssl rand -hex 16)}
+    ports:
+      - "127.0.0.1:8765:8765"
+    entrypoint: ["/usr/bin/tini", "--", "python", "-c"]
+    command:
+      - |
+        import team_coordinator as tc, threading
+        print(tc.start_dashboard(), flush=True)
+        threading.Event().wait()
+
+volumes:
+  team-state:

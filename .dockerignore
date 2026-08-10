@@ -1,0 +1,25 @@
+# Keep the build context small and never ship local state or secrets.
+.git
+.github
+.gitlab-ci.yml
+tests/
+examples/
+docs/
+*.md
+!README.md
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+dist
+build
+*.egg-info
+# Local state, if anyone ever ran the server from the repo root.
+shared_state.json*
+gateway.json*
+gateway_vault.json*
+second_brain/
+adapters/
+team_backups/
+.env

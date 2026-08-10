@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-team-mcp"
-version = "8.7.0"
+version = "8.8.0"
 description = "MCP server that turns multiple AI coding agents (Claude Code, Cursor, Codex CLI, Gemini CLI) into a coordinated team that chats, debates, remembers, audits security, and works in parallel."
 readme = "README.md"
 license = { text = "MIT" }
